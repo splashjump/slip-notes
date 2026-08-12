@@ -50,4 +50,4 @@ else
 fi
 
 echo "== 完成 =="
-echo "本机验证：curl http://<服务器公网IP>:50000/api/health  （通 = 安全组已放行）"
+echo "本机验证：curl http://<服务器公网IP>:50000/api/v1/health  （通 = 安全组已放行）"

@@ -13,8 +13,8 @@ After=docker.service network-online.target
 Type=simple
 Restart=always
 RestartSec=5
-# 容器不存在时创建（数据卷与 env-file 需已就位，见 ops/server-install.sh）
-ExecStartPre=/bin/sh -c 'docker inspect slip-sync >/dev/null 2>&1 || docker create --name slip-sync --restart unless-stopped --env-file /opt/slip/.env -p 50000:50000 -v /opt/slip/data:/app/data slip-sync:latest'
+# 容器不存在时创建（用 container inspect 防止误匹配同名镜像；数据卷与 env-file 需已就位，见 ops/server-install.sh）
+ExecStartPre=/bin/sh -c 'docker container inspect slip-sync >/dev/null 2>&1 || docker create --name slip-sync --restart unless-stopped --env-file /opt/slip/.env -p 50000:50000 -v /opt/slip/data:/app/data slip-sync:latest'
 ExecStart=/usr/bin/docker start -a slip-sync
 ExecStop=/usr/bin/docker stop slip-sync
 

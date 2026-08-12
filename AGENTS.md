@@ -6,8 +6,13 @@
 
 ## 当前状态
 
-- **设计阶段已完成**：完整设计契约见 [GRILL-PLAN.md](GRILL-PLAN.md)（本文档的一切细节以它为准，含决策日志 Q1–Q28 与否决记录）
-- 实施尚未开始。**首个任务：服务器 + 协议（含契约测试）**
+- **设计契约**：[GRILL-PLAN.md](GRILL-PLAN.md)（唯一权威；决策日志 Q1–Q29 + 否决记录）
+- **✅ 第一步已完成并上线：服务器 + 协议（含契约测试）**
+  - 服务器 API 逐字段契约：[docs/protocol.md](docs/protocol.md)；契约测试 `server/test/contract.test.ts`（30 用例全绿）
+  - 已部署阿里云 VPS（Docker node:24，systemd 托管 `slip-sync`，公网 50000 已放行，每日 03:00 在线备份保留 14 份）
+  - 生产冒烟已通过（`server/test/smoke.ts`，用真实 token 全链路验证）
+  - 一键重新部署：`bash server/ops/deploy.sh`（改凭证/换机只改 `.env`）
+- **下一步：Win 画布窗口 spike**（五项验证：透明/置底/区域穿透/多显示器/全屏检测；失败则降级网格排列）
 
 ## 阿里云服务器（同步中枢）与端口
 
