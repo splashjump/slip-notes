@@ -11,11 +11,13 @@
 
 ## 阿里云服务器（同步中枢）与端口
 
-- **连接信息在根目录 `.env`**——AI 可读：需要 SSH 主机/账号/密码时，允许直接读取 `.env`
-- `.env` 含：`SSH_HOST` / `SSH_PORT` / `SSH_USER` / `SSH_PASSWORD`（服务器连接）、`SLIP_SERVER_PORT` / `SLIP_LOCAL_PORT`（端口约定，见下）
-- 端口约定（高位）：同步服务器 **50000**（公网，安全组放行）、Win 本地便签服务 **60000**（仅 127.0.0.1，AI 用 local API）
-- 改凭据/换机时只改 `.env`，本文件不再重复任何细节
-- SSH 已配密钥免密：`ssh slip` 一键登录（`~/.ssh/config` → 服务器，密钥 `~/.ssh/id_slip`）；服务器环境 = CentOS 7 + Docker（node:24 容器跑同步服务，见 GRILL-PLAN §10）
+**连接**（AI 可读：需要时直接读取根目录 `.env`，已 gitignore 绝不提交）
+
+- **一键登录：`ssh slip`**（别名在 `~/.ssh/config`；密钥 `~/.ssh/id_slip`，公钥已装服务器，免密；密码仅备用）
+- `.env` 含：`SSH_HOST` / `SSH_PORT` / `SSH_USER` / `SSH_PASSWORD` / `SSH_KEY_PATH`（服务器连接）、`SLIP_SERVER_PORT` / `SLIP_LOCAL_PORT`（端口约定）
+- 端口（高位）：同步服务器 **50000**（公网；服务器防火墙已放行，**阿里云安全组待放行**）、Win 本地便签服务 **60000**（仅 127.0.0.1，AI 用 local API）
+- 环境：CentOS 7（glibc 2.17 过老，Node 无法直跑）→ 同步服务跑 **Docker 容器 node:24**（见 GRILL-PLAN §10）
+- 改凭据/换机只改 `.env`，本文件不再重复任何细节
 
 ## 技术栈
 

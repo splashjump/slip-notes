@@ -112,12 +112,13 @@ Note {
 - 一张表即状态 + 历史：`note(id, version, content, created_at, deleted_at)`，version = 全局单调序号
 - REST 端点：CRUD（带 base version）+ 版本历史 + `sync?since=cursor`；WS：变更广播 + 心跳 30s
 - 鉴权：每设备一个 token（含 AI 专用 token）
-- 部署：systemd；阿里云安全组最小放行
+- 部署：**Docker 容器**（node:24 镜像；主机 CentOS 7 的 glibc 2.17 无法直跑新版 Node，Docker 绕开）；systemd 托管 docker 服务，容器重启策略 always
+- 端口：公网监听 **50000**（高位，安全组最小放行，服务器防火墙已放）；Win 本地便签服务 **60000**（仅 127.0.0.1，AI 用 local API）
 
 ## 11. 安全与运维
 
 - v1：明文 HTTP + token（已确认）；TLS 后续可选
-- SQLite 定期快照备份（cron）
+- SQLite 定期快照备份（宿主机 cron，对容器数据卷快照）
 - 阿里云安全组最小放行
 
 ## 12. 明确不做（v1）
