@@ -1,0 +1,33 @@
+{
+  "name": "@slip/server",
+  "version": "0.1.0",
+  "private": true,
+  "description": "纸筏同步服务器 — REST(写) + WebSocket(广播)，版本号唯一签发者",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/src/index.js",
+    "dev": "tsx watch src/index.ts",
+    "test": "tsx --test test/contract.test.ts",
+    "backup": "node dist/src/backup.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.0.0",
+    "ws": "^8.18.0",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.0",
+    "@types/node": "^24.0.0",
+    "@types/ws": "^8.18.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.8.0"
+  },
+  "allowScripts": {
+    "better-sqlite3@12.11.1": true,
+    "esbuild@0.28.2": true
+  }
+}
