@@ -1,0 +1,20 @@
+# ===== 秘密与本地环境（绝不提交） =====
+.env
+.env.*
+!.env.example
+
+# ===== Node =====
+node_modules/
+dist/
+*.log
+npm-debug.log*
+
+# ===== 构建产物 =====
+build/
+target/
+*.tsbuildinfo
+
+# ===== 系统文件 =====
+.DS_Store
+Thumbs.db
+desktop.ini
