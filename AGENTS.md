@@ -15,6 +15,7 @@
 - `.env` 含：`SSH_HOST` / `SSH_PORT` / `SSH_USER` / `SSH_PASSWORD`（服务器连接）、`SLIP_SERVER_PORT` / `SLIP_LOCAL_PORT`（端口约定，见下）
 - 端口约定（高位）：同步服务器 **50000**（公网，安全组放行）、Win 本地便签服务 **60000**（仅 127.0.0.1，AI 用 local API）
 - 改凭据/换机时只改 `.env`，本文件不再重复任何细节
+- SSH 已配密钥免密：`ssh slip` 一键登录（`~/.ssh/config` → 服务器，密钥 `~/.ssh/id_slip`）；服务器环境 = CentOS 7 + Docker（node:24 容器跑同步服务，见 GRILL-PLAN §10）
 
 ## 技术栈
 
