@@ -27,22 +27,29 @@ if [ -n "$TOKENS_LINE" ]; then
   node - "$ROOT_ENV" "$TOKENS_LINE" <<'NODE'
 const fs = require("fs");
 const [envPath, tokensLine] = [process.argv[2], process.argv[3]];
-let env = fs.readFileSync(envPath, "utf8");
 const tokens = JSON.parse(tokensLine.slice("SLIP_TOKENS=".length));
-const lines = [
-  "",
+const block = [
   "# ----- 同步服务器 token（部署时自动生成并回存；服务器 /opt/slip/.env 为权威副本）-----",
   tokensLine,
   "# 各端单独取用（Win 客户端 / 安卓 / AI skill）",
   ...Object.entries(tokens).map(([k, v]) => `SLIP_TOKEN_${k.toUpperCase()}=${v}`),
   "",
 ].join("\n");
-if (/^SLIP_TOKENS=/m.test(env)) {
-  env = env.replace(/\n# ----- 同步服务器 token.*(?=\n#|\n[^#\n]|\n$)[\s\S]*?(?=\n# ----- 端口约定|\n$)/, lines);
-} else {
-  env = env.replace(/\n# ----- 端口约定/, lines + "\n# ----- 端口约定");
+
+let text = fs.readFileSync(envPath, "utf8");
+// 删除旧 token 块（从标记行到下一个 “# -----” 段落之前）
+const marker = "# ----- 同步服务器 token";
+const idx = text.indexOf(marker);
+if (idx >= 0) {
+  const nextMarker = text.indexOf("\n# -----", idx + 1);
+  const end = nextMarker >= 0 ? nextMarker : text.length;
+  text = text.slice(0, idx) + text.slice(end);
 }
-fs.writeFileSync(envPath, env);
+// 插到端口约定段之前；找不到就追加到文件末尾
+const insertAt = text.indexOf("\n# ----- 端口约定");
+if (insertAt >= 0) text = text.slice(0, insertAt) + "\n" + block + text.slice(insertAt);
+else text = text.replace(/\s*$/, "\n" + block + "\n");
+fs.writeFileSync(envPath, text);
 console.log("已更新本地 .env：" + Object.keys(tokens).map((k) => `${k}=<已回存>`).join(" "));
 NODE
 else

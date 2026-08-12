@@ -13,6 +13,7 @@
   - 生产冒烟已通过（`server/test/smoke.ts`，用真实 token 全链路验证）
   - 一键重新部署：`bash server/ops/deploy.sh`（改凭证/换机只改 `.env`）
 - **下一步：Win 画布窗口 spike**（五项验证：透明/置底/区域穿透/多显示器/全屏检测；失败则降级网格排列）
+  - 交接文档：[docs/handover-win-spike.md](docs/handover-win-spike.md)（五项验收标准、已知坑、环境准备、衔接提示）
 
 ## 阿里云服务器（同步中枢）与端口
 
