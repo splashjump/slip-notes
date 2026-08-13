@@ -7,10 +7,13 @@
 
 ## 运行方式
 
-```bash
-cd win && bash dev.sh        # 精准清理旧进程 → tauri dev（vite 端口 1430）
-tail -f /tmp/tauri_dev.log   # Rust 侧日志
+```powershell
+cd win && .\dev.ps1        # PowerShell 一键重启：精准清理旧进程 → tauri dev（vite 端口 1430）
+Get-Content -Wait $env:TEMP\tauri_dev.log   # Rust 侧日志
 ```
+
+- （有 git bash 的机器仍可用 `bash dev.sh`，日志在 `/tmp/tauri_dev.log`）
+- 手动停止：`taskkill /F /IM win.exe`；重启前不必手动停，脚本会自动清理
 
 - 画布窗口：每显示器一个（label `canvas-N`），透明/无边框/置底/无任务栏图标
 - 调试台（`main` 窗口）：显示显示器拓扑、便签物理坐标、运行状态；按钮：重建画布 / 重置便签 / 隐藏调试台

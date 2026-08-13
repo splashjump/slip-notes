@@ -14,7 +14,7 @@
   - 一键重新部署：`bash server/ops/deploy.sh`（改凭证/换机只改 `.env`）
 - **✅ 第二步已完成：Win 画布窗口 spike，门禁通过 → 保留画布方案**
   - 透明/置底/区域穿透/全屏检测四项实测通过；多显示器代码就绪，待第二台 Win10 实机验证（作为任务三验收项）
-  - 实测记录 + 演示步骤 + 踩坑清单：[win/SPIKE.md](win/SPIKE.md)；工程 `win/`（Tauri v2，运行 `cd win && bash dev.sh`）
+  - 实测记录 + 演示步骤 + 踩坑清单：[win/SPIKE.md](win/SPIKE.md)；工程 `win/`（Tauri v2，运行 `cd win && .\dev.ps1`）
 - **下一步：Win 客户端（任务三）**——数据层 + journal + 同步引擎接服务器（`.env` 的 `SLIP_TOKEN_WIN1/WIN2`）+ local API(60000) + position 持久化（`content.position`）
 
 ## 阿里云服务器（同步中枢）与端口
