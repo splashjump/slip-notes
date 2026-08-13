@@ -58,7 +58,7 @@ export function buildCard(
   } else {
     const text = document.createElement("div");
     text.className = "text";
-    text.textContent = n.text.replace("\\n", "\n");
+    text.textContent = n.text.replace(/\\n/g, "\n");
     el.appendChild(text);
   }
   return el;

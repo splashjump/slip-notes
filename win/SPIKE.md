@@ -75,6 +75,7 @@ Get-Content -Wait $env:TEMP\tauri_dev.log   # Rust 侧日志
 
 ## 待办 / 遗留
 
+- [ ] 编辑/勾选不持久化（spike 已知限制）：文本编辑、checklist 勾选只改本窗口 DOM，重渲染（拖动/重建）即丢失、重启重置——任务三接数据层后统一处理（journal 追加 + 同步）
 - [ ] 多显示器实机验证（两台 Win10 各一遍 + DPI 125%/150% 差异）
 - [ ] 编辑蓝色 outline 在注入点击下未观察到，真实用户操作人工复核（代码路径已通：class 添加 + CSS outline）
 - [ ] 游戏/视频真实全屏场景验收（spike 用窗口全屏化模拟验证了事件链路）

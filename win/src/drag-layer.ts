@@ -4,18 +4,13 @@
 import { emit, listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { PhysicalSize } from "@tauri-apps/api/dpi";
-import { buildCard } from "./card";
+import { buildCard, type Note } from "./card";
 
 // 卡片阴影边距（CSS px），与 Rust 侧 create_drag_layer/handle_drag_start 的 MARGIN 一致
 const MARGIN = 30;
 
 interface DragLayerShow {
-  note: {
-    color: string;
-    kind: string;
-    text: string;
-    items: { text: string; done: boolean }[];
-  };
+  note: Note;
   w: number; // 物理 px（卡片内容宽）
   h: number; // 物理 px
 }
