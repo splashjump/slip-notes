@@ -145,6 +145,7 @@ function bindPointer(el: HTMLElement, n: Note) {
     drag = null;
     el.classList.remove("dragging");
     if (wasMoved) {
+      dragLayerShown = false; // 会话结束复位（迟到的回执不会误伤下一次拖动）
       void (async () => {
         await refreshWinPhys();
         // 卡片可能已被拖拽层接管（display:none），getBoundingClientRect 失效，
@@ -170,13 +171,14 @@ function bindPointer(el: HTMLElement, n: Note) {
     const wasMoved = drag.moved;
     drag = null;
     el.classList.remove("dragging");
+    dragLayerShown = false; // 会话结束复位
     if (wasMoved) void emit("drag-cancel", { label });
   });
 }
 
 /// 拖动中：rAF 节流上报便签物理位置 → Rust 移动拖拽层窗口
 function emitDragMove() {
-  if (!drag || dragMovePending) return;
+  if (!drag || dragMovePending || !dragLayerShown) return; // 降级时层未显示，发送无意义
   dragMovePending = true;
   const el = cards.get(drag.id);
   const w = drag.w;

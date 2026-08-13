@@ -22,7 +22,7 @@ use windows::Win32::Graphics::Gdi::{
     HGDIOBJ, HMONITOR, HRGN, MONITORINFOEXW, SetWindowRgn, RGN_OR,
 };
 use windows::Win32::UI::Accessibility::{SetWinEventHook, UnhookWinEvent, HWINEVENTHOOK};
-use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
+use windows::Win32::UI::HiDpi::{GetDpiForMonitor, GetDpiForWindow, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::WindowsAndMessaging::{
     DispatchMessageW, GetClassNameW, GetForegroundWindow, GetMessageW, GetWindowLongPtrW,
     GetWindowRect, SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage,
@@ -95,6 +95,18 @@ const HOOK_EVENT_LOC: u32 = EVENT_OBJECT_LOCATIONCHANGE;
 
 pub fn canvas_label(i: usize) -> String {
     format!("canvas-{i}")
+}
+
+/// 窗口当前所在显示器的缩放比（跨 DPI 屏拖动时实时变化，不能长期缓存）
+fn window_scale(hwnd: HWND) -> f64 {
+    unsafe {
+        let dpi = GetDpiForWindow(hwnd);
+        if dpi > 0 {
+            dpi as f64 / 96.0
+        } else {
+            1.0
+        }
+    }
 }
 
 fn create_canvas_window(app: &AppHandle, label: &str, rect: &RECT) -> tauri::Result<()> {
@@ -474,6 +486,9 @@ impl Inner {
 
     /// 每显示器一个画布窗口
     fn rebuild_canvases(&mut self, app: &AppHandle) {
+        // 拖动中拓扑重建（拔显示器）会销毁画布窗口 → pointer 事件终止，
+        // drag-end/cancel 永不到达 → 必须主动清理拖拽层，否则残留屏幕 + 卡片永久隐藏
+        self.dismiss_drag_layer(app);
         // 关掉所有旧画布窗口（不能按 monitors.len() 推断：显示器数量减少时
         // 旧索引的窗口不在新拓扑里，按 len 关会残留幽灵画布窗口）
         let old: Vec<String> = app
@@ -496,6 +511,17 @@ impl Inner {
                 log::warn!("创建画布窗口 {label} 失败: {e}");
             }
         }
+    }
+
+    /// 清理拖拽层（拖动中断兜底：重建画布等场景）——隐藏窗口 + 复位状态
+    fn dismiss_drag_layer(&mut self, app: &AppHandle) {
+        if !self.drag_layer_shown {
+            return;
+        }
+        if let Some(dl) = app.get_webview_window("drag-layer") {
+            hide_win(&dl);
+        }
+        self.drag_layer_shown = false;
     }
 
     /// 每显示器内属于它的便签（按中心点归属，物理坐标）
@@ -919,7 +945,8 @@ pub fn handle_drag_start(app: &AppHandle, p: DragStartPayload) {
     let Some(dl) = app.get_webview_window("drag-layer") else {
         return;
     };
-    let dpr = g.drag_layer_dpr.unwrap_or(1.0);
+    // 实时重查 DPR（层窗口可能位于不同 DPI 的显示器，就绪时上报的缓存值会过期）
+    let dpr = dl.hwnd().map(window_scale).unwrap_or_else(|_| g.drag_layer_dpr.unwrap_or(1.0));
     let margin = DRAG_LAYER_MARGIN * dpr; // 阴影边距（物理 px）
     // 内容注入（物理尺寸 → 前端按自身 DPR 换算 CSS）
     let _ = dl.emit(
@@ -963,7 +990,11 @@ pub fn handle_drag_move(app: &AppHandle, p: DragMovePayload) {
     let x = p.x.clamp(v.left as f64, (v.right as f64 - p.w).max(v.left as f64));
     let y = p.y.clamp(v.top as f64, (v.bottom as f64 - p.h).max(v.top as f64));
     if let Some(dl) = app.get_webview_window("drag-layer") {
-        let margin = DRAG_LAYER_MARGIN * g.drag_layer_dpr.unwrap_or(1.0);
+        let dpr = dl
+            .hwnd()
+            .map(window_scale)
+            .unwrap_or_else(|_| g.drag_layer_dpr.unwrap_or(1.0));
+        let margin = DRAG_LAYER_MARGIN * dpr;
         if let Ok(hwnd) = dl.hwnd() {
             set_pos(
                 hwnd,
@@ -987,9 +1018,14 @@ pub fn handle_drag_end(app: &AppHandle, p: DragEndPayload) {
     let Ok(mut g) = inner.lock() else {
         return;
     };
+    // 落点必须 clamp 到虚拟屏（与 drag-move 同规则）：前端上报的是未 clamp 值，
+    // 否则便签中心可能落在所有显示器之外 → 任何画布都不渲染它 → 永久消失。
+    let v = g.virtual_rect;
+    let x = p.x.clamp(v.left as f64, (v.right as f64 - p.w).max(v.left as f64));
+    let y = p.y.clamp(v.top as f64, (v.bottom as f64 - p.h).max(v.top as f64));
     if let Some(n) = g.notes.iter_mut().find(|n| n.id == p.id) {
-        n.x = p.x;
-        n.y = p.y;
+        n.x = x;
+        n.y = y;
         n.w = p.w;
         n.h = p.h;
     }
@@ -999,10 +1035,7 @@ pub fn handle_drag_end(app: &AppHandle, p: DragEndPayload) {
         g.notes.push(n);
     }
     // 隐藏拖拽层（恢复原卡片显示由 emit_notes 重渲染完成）
-    if let Some(dl) = app.get_webview_window("drag-layer") {
-        hide_win(&dl);
-    }
-    g.drag_layer_shown = false;
+    g.dismiss_drag_layer(app);
     // 全量重发（简单可靠：每窗口拿自己屏内的便签，按中心点自动跨屏归属）
     let labels: Vec<String> = (0..g.monitors.len()).map(canvas_label).collect();
     g.emit_notes(app, &labels);
@@ -1019,10 +1052,7 @@ pub fn handle_drag_cancel(app: &AppHandle, p: LabelPayload) {
     let Ok(mut g) = inner.lock() else {
         return;
     };
-    if let Some(dl) = app.get_webview_window("drag-layer") {
-        hide_win(&dl);
-    }
-    g.drag_layer_shown = false;
+    g.dismiss_drag_layer(app);
     g.emit_notes(app, &[p.label.clone()]);
     g.emit_state(app);
 }
