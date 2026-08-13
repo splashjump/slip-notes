@@ -1,0 +1,572 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>纸筏 · 便签风格 Demo</title>
+<style>
+/* ============================================================
+   纸筏便签 · 6 套风格 Demo（纯前端，与 win/ 工程无关）
+   ============================================================ */
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+:root {
+  --ui-font: "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+  --hand-font: "KaiTi", "STKaiti", "楷体", "Segoe Print", cursive;
+  --mono-font: "Cascadia Code", "Consolas", monospace;
+}
+
+html, body { height: 100%; overflow: hidden; font-family: var(--ui-font); }
+
+/* ---------- 舞台 / 壁纸 ---------- */
+#stage { position: fixed; inset: 0; }
+
+#wallpaper {
+  position: absolute; inset: 0;
+  background: linear-gradient(125deg, #dbe7ff 0%, #f6e8ff 32%, #ffe9f0 62%, #e3f7ee 100%);
+  background-size: 220% 220%;
+  animation: drift 26s ease-in-out infinite alternate;
+  transition: filter .6s;
+}
+#stage.dark #wallpaper {
+  background: linear-gradient(125deg, #0b1020 0%, #191334 40%, #1c1030 70%, #0a1622 100%);
+  animation-duration: 40s;
+}
+@keyframes drift {
+  0%   { background-position: 0% 0%; }
+  100% { background-position: 100% 100%; }
+}
+
+/* 桌面装饰：极简的"任务栏"示意 */
+#deskbar {
+  position: absolute; left: 0; right: 0; bottom: 0; height: 42px;
+  background: rgba(255,255,255,.55);
+  backdrop-filter: blur(16px);
+  border-top: 1px solid rgba(255,255,255,.6);
+  display: flex; align-items: center; gap: 8px; padding: 0 14px;
+  font-size: 12px; color: #555; z-index: 5;
+}
+#stage.dark #deskbar {
+  background: rgba(20,22,34,.55);
+  border-top-color: rgba(255,255,255,.08);
+  color: #9aa3b5;
+}
+.desk-dot { width: 26px; height: 26px; border-radius: 7px; background: linear-gradient(135deg,#7c9dff,#b48cff); }
+.desk-dot:nth-child(2) { background: linear-gradient(135deg,#ffb07c,#ff7c9d); }
+.desk-dot:nth-child(3) { background: linear-gradient(135deg,#7ce8b0,#4fb3ff); }
+#deskbar .spacer { flex: 1; }
+.desk-clock { font-variant-numeric: tabular-nums; letter-spacing: .5px; }
+
+/* ---------- 便签通用 ---------- */
+.note {
+  position: absolute;
+  width: 250px;
+  padding: 16px 18px;
+  border-radius: 12px;
+  font-size: 13.5px;
+  line-height: 1.65;
+  cursor: default;
+  user-select: none;
+  transition: transform .2s ease, box-shadow .2s ease;
+  z-index: 2;
+}
+.note .title {
+  font-size: 15.5px;
+  font-weight: 700;
+  margin-bottom: 8px;
+}
+.note .body { white-space: pre-wrap; word-break: break-word; }
+.note .items { list-style: none; margin-top: 2px; }
+.note .items li {
+  display: flex; align-items: center; gap: 8px;
+  padding: 3px 0; cursor: pointer;
+}
+.note .items li i {
+  flex: none;
+  width: 15px; height: 15px;
+  border-radius: 4px;
+  position: relative;
+  transition: all .15s ease;
+}
+.note .items li i::after {
+  content: "✓";
+  position: absolute; inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 11px; font-weight: 700;
+  opacity: 0; transform: scale(.4);
+  transition: all .15s ease;
+}
+.note .items li.done i::after { opacity: 1; transform: scale(1); }
+.note .items li.done span { text-decoration: line-through; opacity: .5; }
+.note .meta {
+  margin-top: 10px;
+  font-size: 11px;
+  opacity: .55;
+  letter-spacing: .3px;
+}
+.note:hover { z-index: 10; }
+
+.rot-a { transform: rotate(-1.4deg); }
+.rot-b { transform: rotate(1.1deg); }
+.rot-c { transform: rotate(-.7deg); }
+.note:hover { transform: rotate(0) translateY(-3px); }
+
+/* ============================================================
+   ① 经典黄 · 纸胶带 + 卷角
+   ============================================================ */
+.note.classic {
+  background: linear-gradient(172deg, #fef9c7 0%, #fdef96 58%, #fadd65 100%);
+  border-radius: 3px 14px 14px 3px;
+  color: #5a4a1e;
+  font-family: var(--hand-font);
+  font-size: 14.5px;
+  box-shadow: 0 3px 8px rgba(92, 72, 18, .28), 0 12px 26px rgba(92, 72, 18, .14);
+}
+.note.classic .title { color: #4a3c14; letter-spacing: 1px; }
+.note.classic::before {           /* 纸胶带 */
+  content: "";
+  position: absolute;
+  top: -11px; left: 50%;
+  width: 92px; height: 24px;
+  transform: translateX(-50%) rotate(-3deg);
+  background: linear-gradient(180deg,
+    rgba(226,214,170,.85) 0%,
+    rgba(246,240,214,.6) 45%,
+    rgba(226,214,170,.8) 100%);
+  border-left: 1px dashed rgba(150,130,80,.5);
+  border-right: 1px dashed rgba(150,130,80,.5);
+  box-shadow: 0 2px 4px rgba(120,100,50,.18);
+}
+.note.classic::after {            /* 右下卷角 */
+  content: "";
+  position: absolute;
+  right: 0; bottom: 0;
+  width: 0; height: 0;
+  border-style: solid;
+  border-width: 0 0 22px 22px;
+  border-color: transparent transparent rgba(120, 92, 20, .22) transparent;
+  border-radius: 0 0 12px 0;
+}
+.note.classic .items li i {
+  background: rgba(255, 255, 255, .4);
+  border: 1.5px solid rgba(90, 70, 20, .5);
+  border-radius: 3px;
+}
+.note.classic .items li.done i { background: #8a7a35; border-color: #8a7a35; }
+.note.classic .items li.done i::after { color: #fdf6c0; }
+.note.classic .meta { color: #7a6a34; }
+
+/* ============================================================
+   ② 毛玻璃 · Glassmorphism
+   ============================================================ */
+.note.glass {
+  background: linear-gradient(140deg, rgba(255,255,255,.58), rgba(255,255,255,.26));
+  backdrop-filter: blur(20px) saturate(1.5);
+  -webkit-backdrop-filter: blur(20px) saturate(1.5);
+  border: 1px solid rgba(255, 255, 255, .65);
+  border-radius: 18px;
+  color: #23304a;
+  box-shadow: 0 10px 34px rgba(25, 45, 100, .22), inset 0 1px 0 rgba(255,255,255,.75);
+}
+.note.glass .title { color: #0f2748; }
+.note.glass::before {             /* 顶部渐变 accent 条 */
+  content: "";
+  position: absolute;
+  top: 0; left: 20px; right: 20px;
+  height: 3.5px;
+  border-radius: 0 0 4px 4px;
+  background: linear-gradient(90deg, #60a5fa, #a78bfa 45%, #f472b6);
+}
+.note.glass .items li i {
+  background: rgba(255,255,255,.65);
+  border: 1px solid rgba(255,255,255,.9);
+  border-radius: 50%;
+}
+.note.glass .items li.done i {
+  background: linear-gradient(135deg, #34d399, #60a5fa);
+  border-color: transparent;
+}
+.note.glass .items li.done i::after { color: #fff; }
+.note.glass .meta { color: #47597a; }
+
+/* ============================================================
+   ③ 新拟态 · Neumorphism
+   ============================================================ */
+.note.neumorph {
+  background: #e6ebf2;
+  border-radius: 22px;
+  color: #3a4456;
+  box-shadow: 10px 10px 24px #c7d0dd, -10px -10px 24px #ffffff;
+}
+.note.neumorph .title { color: #4f6ef2; letter-spacing: .4px; }
+.note.neumorph .items li i {
+  background: #e6ebf2;
+  border-radius: 50%;
+  box-shadow: inset 3px 3px 6px #c7d0dd, inset -3px -3px 6px #ffffff;
+}
+.note.neumorph .items li.done i {
+  box-shadow: inset 3px 3px 6px #c7d0dd, inset -3px -3px 6px #ffffff, 0 0 0 2px #e6ebf2;
+}
+.note.neumorph .items li.done i::after { color: #4f6ef2; }
+.note.neumorph .meta { color: #7a8496; }
+.note.neumorph .body { font-weight: 450; }
+
+/* ============================================================
+   ④ 霓虹深色 · Neon
+   ============================================================ */
+.note.neon {
+  --accent: #22d3ee;
+  background: linear-gradient(160deg, #171b28 0%, #0d1019 100%);
+  border: 1px solid var(--accent);
+  border-radius: 14px;
+  color: #d7dce8;
+  font-family: var(--mono-font);
+  font-size: 12.5px;
+  box-shadow: 0 0 18px color-mix(in srgb, var(--accent) 35%, transparent),
+              inset 0 0 30px color-mix(in srgb, var(--accent) 6%, transparent);
+}
+.note.neon[data-accent="violet"] { --accent: #a78bfa; }
+.note.neon[data-accent="pink"]   { --accent: #f472b6; }
+.note.neon[data-accent="green"]  { --accent: #34d399; }
+.note.neon .title {
+  color: var(--accent);
+  font-family: var(--mono-font);
+  letter-spacing: 1px;
+  text-shadow: 0 0 10px color-mix(in srgb, var(--accent) 60%, transparent);
+}
+.note.neon .title::before { content: "▍"; margin-right: 4px; }
+.note.neon .items li i {
+  background: transparent;
+  border: 1.5px solid var(--accent);
+  border-radius: 3px;
+  box-shadow: 0 0 6px color-mix(in srgb, var(--accent) 50%, transparent);
+}
+.note.neon .items li.done i { background: var(--accent); }
+.note.neon .items li.done i::after { color: #0d1019; }
+.note.neon .meta { color: color-mix(in srgb, var(--accent) 55%, #8a93a8); }
+.note.neon:hover { box-shadow: 0 0 26px color-mix(in srgb, var(--accent) 60%, transparent), inset 0 0 34px color-mix(in srgb, var(--accent) 9%, transparent); }
+
+/* ============================================================
+   ⑤ 手账纸 · 横线 + 回形针 + 撕纸边
+   ============================================================ */
+.note.paper {
+  background:
+    linear-gradient(rgba(96, 140, 220, .16) 1px, transparent 1px) 0 0 / 100% 26px,
+    linear-gradient(#fffdf5, #fffdf5);
+  border: 1px solid #eee6d2;
+  border-radius: 6px 6px 0 0;
+  color: #4a4233;
+  font-family: var(--hand-font);
+  font-size: 14.5px;
+  box-shadow: 2px 4px 10px rgba(120, 100, 60, .16);
+  clip-path: polygon(
+    0 0, 100% 0, 100% calc(100% - 11px),
+    96% 100%, 92% calc(100% - 8px), 87% 100%, 82% calc(100% - 10px),
+    77% 100%, 72% calc(100% - 7px), 66% 100%, 60% calc(100% - 10px),
+    54% 100%, 48% calc(100% - 8px), 42% 100%, 36% calc(100% - 10px),
+    30% 100%, 24% calc(100% - 7px), 18% 100%, 12% calc(100% - 9px),
+    6% 100%, 0 calc(100% - 11px)
+  );
+}
+.note.paper .title { color: #b3543f; letter-spacing: 1.5px; }
+.note.paper .body { color: #54493a; }
+.note.paper::before {             /* 左侧红色装订线 */
+  content: "";
+  position: absolute;
+  left: 36px; top: 0; bottom: 0;
+  width: 1px;
+  background: rgba(231, 120, 120, .55);
+}
+.note.paper::after {              /* 回形针 */
+  content: "";
+  position: absolute;
+  top: -5px; right: 20px;
+  width: 17px; height: 38px;
+  border: 3.5px solid #c3c9d4;
+  border-radius: 9px;
+  background: linear-gradient(180deg, #eef1f6 0%, #b9c0cc 55%, #e8ecf2 100%);
+  box-shadow: 0 2px 4px rgba(60, 70, 90, .3);
+  transform: rotate(4deg);
+}
+.note.paper .items li { padding-left: 44px; }
+.note.paper .items li i {
+  background: #fff;
+  border: 1.5px solid #c9b98f;
+  border-radius: 2px;
+}
+.note.paper .items li.done i { background: #7d9bc9; border-color: #7d9bc9; }
+.note.paper .items li.done i::after { color: #fff; }
+.note.paper .meta { color: #9a8f74; }
+.note.paper:hover { transform: rotate(0) translateY(-2px) scale(1.015); }
+
+/* ============================================================
+   ⑥ Win11 极简 · Fluent
+   ============================================================ */
+.note.fluent {
+  background: #ffffff;
+  border: 1px solid #ededf2;
+  border-radius: 10px;
+  color: #1f2430;
+  box-shadow: 0 2px 6px rgba(0,0,0,.05), 0 14px 28px rgba(20, 40, 90, .07);
+}
+.note.fluent .title { color: #0b57d0; }
+.note.fluent .items li i {
+  background: #fff;
+  border: 1.6px solid #d4d4dd;
+  border-radius: 5px;
+}
+.note.fluent .items li.done i {
+  background: #0b57d0;
+  border-color: #0b57d0;
+  box-shadow: 0 0 0 3px rgba(11, 87, 208, .14);
+}
+.note.fluent .items li.done i::after { color: #fff; }
+.note.fluent .meta { color: #8b93a3; }
+.note.fluent:hover {
+  box-shadow: 0 6px 16px rgba(0,0,0,.07), 0 20px 38px rgba(20, 40, 90, .11);
+}
+
+/* ---------- 控制面板 ---------- */
+#panel {
+  position: fixed;
+  left: 50%; bottom: 62px;
+  transform: translateX(-50%);
+  z-index: 20;
+  display: flex; align-items: center; gap: 18px;
+  padding: 12px 18px;
+  border-radius: 16px;
+  background: rgba(22, 26, 40, .82);
+  backdrop-filter: blur(18px);
+  border: 1px solid rgba(255,255,255,.12);
+  box-shadow: 0 12px 40px rgba(0,0,0,.35);
+  max-width: calc(100vw - 40px);
+}
+#panel .info { min-width: 150px; }
+#panel .info .name {
+  color: #fff; font-size: 15px; font-weight: 700; letter-spacing: 1px;
+}
+#panel .info .desc {
+  color: #9aa3b8; font-size: 11.5px; margin-top: 2px; line-height: 1.5;
+}
+#btns { display: flex; gap: 6px; flex-wrap: wrap; }
+#btns button {
+  display: flex; align-items: center; gap: 7px;
+  border: 1px solid rgba(255,255,255,.14);
+  background: rgba(255,255,255,.07);
+  color: #cdd3e0;
+  border-radius: 9px;
+  padding: 7px 12px;
+  font-size: 12.5px;
+  font-family: var(--ui-font);
+  cursor: pointer;
+  transition: all .15s ease;
+}
+#btns button .dot { width: 10px; height: 10px; border-radius: 50%; }
+#btns button:hover { background: rgba(255,255,255,.14); color: #fff; }
+#btns button.active {
+  background: rgba(255,255,255,.22);
+  color: #fff;
+  border-color: rgba(255,255,255,.45);
+  box-shadow: 0 0 0 3px rgba(255,255,255,.08);
+}
+#tools { display: flex; gap: 6px; }
+#tools button {
+  width: 34px; height: 34px;
+  border: 1px solid rgba(255,255,255,.14);
+  background: rgba(255,255,255,.07);
+  color: #cdd3e0;
+  border-radius: 9px;
+  font-size: 15px;
+  cursor: pointer;
+  transition: all .15s ease;
+}
+#tools button:hover { background: rgba(255,255,255,.16); color: #fff; }
+#tools button.on { background: rgba(96, 165, 250, .35); border-color: rgba(96,165,250,.6); }
+.kbd-hint {
+  position: fixed; right: 16px; bottom: 56px; z-index: 20;
+  font-size: 11px; color: rgba(255,255,255,.5);
+  text-shadow: 0 1px 3px rgba(0,0,0,.5);
+  letter-spacing: .5px;
+}
+
+/* 小屏兜底：便签改为流式排布 */
+@media (max-width: 900px) {
+  body { overflow: auto; }
+  #stage { position: absolute; height: auto; min-height: 100vh; }
+  .note { position: static !important; margin: 14px auto; transform: none !important; }
+  #panel { position: sticky; top: 10px; transform: none; left: auto; margin: 0 auto; width: fit-content; flex-direction: column; gap: 10px; }
+}
+</style>
+</head>
+<body>
+<div id="stage" class="">
+  <div id="wallpaper"></div>
+
+  <div id="scene"></div>
+
+  <!-- 桌面任务栏示意 -->
+  <div id="deskbar">
+    <div class="desk-dot"></div><div class="desk-dot"></div><div class="desk-dot"></div>
+    <div class="spacer"></div>
+    <div class="desk-clock" id="clock"></div>
+  </div>
+
+  <div class="kbd-hint">← → 切换风格 · 点清单项试试</div>
+</div>
+
+<!-- 控制面板 -->
+<div id="panel">
+  <div class="info">
+    <div class="name" id="style-name">经典黄</div>
+    <div class="desc" id="style-desc"></div>
+  </div>
+  <div id="btns"></div>
+  <div id="tools">
+    <button id="toggle-dark" title="切换壁纸明暗">🌙</button>
+    <button id="toggle-auto" title="自动轮播">▶</button>
+  </div>
+</div>
+
+<script>
+// ============ 场景与内容（6 套风格共用同一批便签内容，便于对比） ============
+const NOTES = [
+  {
+    cls: "rot-a", left: "10%", top: "16%",
+    title: "备忘",
+    body: "记得跑一遍 server 契约测试\n再合并 PR 🔒",
+    meta: "昨天 22:41"
+  },
+  {
+    cls: "rot-b", left: "40%", top: "30%",
+    title: "今日清单",
+    items: [
+      { t: "部署 smoke 测试", done: true },
+      { t: "position 持久化", done: false },
+      { t: "第二台 Win 验证多显示器", done: false },
+      { t: "审阅 GRILL-PLAN 下一阶段草案", done: false },
+    ],
+    meta: "今天 08:15"
+  },
+  {
+    cls: "rot-c", left: "68%", top: "15%",
+    title: "纸筏",
+    body: "纸筏传纸条：把便签送到每一台设备。\n跨设备强同步，AI 像第二个用户一样替你打理纸条。",
+    meta: "今天 09:30"
+  },
+];
+
+const STYLES = [
+  { key: "classic",  name: "经典黄", desc: "纸胶带 + 卷角，手写感", dot: "#f6d365" },
+  { key: "glass",    name: "毛玻璃", desc: "模糊通透，Win11 质感", dot: "#9fd0ff" },
+  { key: "neumorph", name: "新拟态", desc: "柔和浮雕，同色系光影", dot: "#c7d0dd" },
+  { key: "neon",     name: "霓虹",   desc: "深色底 + 霓虹发光",   dot: "#22d3ee" },
+  { key: "paper",    name: "手账纸", desc: "横线 + 回形针 + 撕纸边", dot: "#e8a08a" },
+  { key: "fluent",   name: "极简",   desc: "Win11 Fluent 卡片",    dot: "#0b57d0" },
+];
+
+const ACCENTS = ["cyan", "violet", "pink", "green"];
+
+// ============ 渲染 ============
+const scene = document.getElementById("scene");
+const nameEl = document.getElementById("style-name");
+const descEl = document.getElementById("style-desc");
+const btnsEl = document.getElementById("btns");
+let current = 0;
+
+function buildNote(style, data, idx) {
+  const el = document.createElement("div");
+  el.className = `note ${style} ${data.cls}`;
+  el.style.left = data.left;
+  el.style.top = data.top;
+  if (style === "neon") el.dataset.accent = ACCENTS[idx % ACCENTS.length];
+
+  if (data.title) {
+    const t = document.createElement("div");
+    t.className = "title";
+    t.textContent = data.title;
+    el.appendChild(t);
+  }
+  if (data.body) {
+    const b = document.createElement("div");
+    b.className = "body";
+    b.textContent = data.body;
+    el.appendChild(b);
+  }
+  if (data.items) {
+    const ul = document.createElement("ul");
+    ul.className = "items";
+    data.items.forEach(it => {
+      const li = document.createElement("li");
+      if (it.done) li.className = "done";
+      const i = document.createElement("i");
+      const span = document.createElement("span");
+      span.textContent = it.t;
+      li.append(i, span);
+      li.addEventListener("click", () => li.classList.toggle("done"));
+      ul.appendChild(li);
+    });
+    el.appendChild(ul);
+  }
+  const meta = document.createElement("div");
+  meta.className = "meta";
+  meta.textContent = "🕐 " + data.meta;
+  el.appendChild(meta);
+  return el;
+}
+
+function render() {
+  const style = STYLES[current];
+  history.replaceState(null, "", "#" + style.key);
+  scene.innerHTML = "";
+  NOTES.forEach((n, i) => scene.appendChild(buildNote(style.key, n, i)));
+  nameEl.textContent = style.name;
+  descEl.textContent = style.desc;
+  btnsEl.querySelectorAll("button").forEach((b, i) => {
+    b.classList.toggle("active", i === current);
+  });
+}
+
+// 风格按钮
+STYLES.forEach((s, i) => {
+  const b = document.createElement("button");
+  b.innerHTML = `<span class="dot" style="background:${s.dot}"></span>${s.name}`;
+  b.addEventListener("click", () => { current = i; render(); });
+  btnsEl.appendChild(b);
+});
+
+// 明暗壁纸
+const stage = document.getElementById("stage");
+document.getElementById("toggle-dark").addEventListener("click", function () {
+  stage.classList.toggle("dark");
+  this.textContent = stage.classList.contains("dark") ? "☀️" : "🌙";
+});
+
+// 自动轮播
+let timer = null;
+const autoBtn = document.getElementById("toggle-auto");
+autoBtn.addEventListener("click", () => {
+  if (timer) { clearInterval(timer); timer = null; autoBtn.classList.remove("on"); autoBtn.textContent = "▶"; }
+  else { timer = setInterval(() => { current = (current + 1) % STYLES.length; render(); }, 4000); autoBtn.classList.add("on"); autoBtn.textContent = "⏸"; }
+});
+
+// 键盘 ← → 与 URL hash（#classic 等）
+const hashIdx = STYLES.findIndex(s => s.key === location.hash.slice(1));
+if (hashIdx >= 0) current = hashIdx;
+document.addEventListener("keydown", (e) => {
+  if (e.key === "ArrowRight") { current = (current + 1) % STYLES.length; render(); }
+  if (e.key === "ArrowLeft")  { current = (current - 1 + STYLES.length) % STYLES.length; render(); }
+});
+
+// 任务栏时钟
+function tick() {
+  const d = new Date();
+  document.getElementById("clock").textContent =
+    d.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
+}
+setInterval(tick, 10000);
+tick();
+
+render();
+</script>
+</body>
+</html>
