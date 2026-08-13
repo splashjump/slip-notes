@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="zh">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" href="/src/styles.css" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>slip</title>
+    <script type="module" src="/src/main.ts" defer></script>
+  </head>
+  <body>
+    <div id="canvas-root"></div>
+    <div id="debug-root">
+      <h1>纸筏 slip — 画布窗口 spike 调试台</h1>
+      <p class="hint">
+        画布窗口已铺到每个显示器（透明/无边框/置底）。在桌面便签卡片上：
+        单击=编辑，拖动=移动，拖出屏幕边缘=跨屏。打开一个全屏视频/游戏观察画布自动隐藏。
+      </p>
+      <div class="toolbar">
+        <button id="btn-rebuild">重建画布窗口</button>
+        <button id="btn-reset">重置便签位置</button>
+        <button id="btn-minimize-debug">最小化调试台</button>
+      </div>
+      <h2>显示器拓扑</h2>
+      <pre id="monitors">等待状态…</pre>
+      <h2>便签（物理坐标）</h2>
+      <pre id="notes">—</pre>
+      <h2>运行状态</h2>
+      <pre id="status">—</pre>
+    </div>
+  </body>
+</html>

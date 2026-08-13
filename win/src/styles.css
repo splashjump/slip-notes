@@ -1,0 +1,127 @@
+/* ===== 全局：WebView2 真透明（画布窗口） ===== */
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background: transparent !important;
+  overflow: hidden;
+}
+
+/* ===== 画布窗口 ===== */
+#canvas-root {
+  display: none;
+  position: fixed;
+  inset: 0;
+}
+body.canvas #canvas-root {
+  display: block;
+}
+body.canvas {
+  cursor: default;
+}
+
+.note-card {
+  position: absolute;
+  box-sizing: border-box;
+  border-radius: 12px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.18);
+  padding: 12px 14px;
+  font: 14px/1.6 "Segoe UI", "Microsoft YaHei", sans-serif;
+  color: #333;
+  cursor: grab;
+  user-select: none;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.note-card .title {
+  font-weight: 600;
+  font-size: 15px;
+}
+.note-card .text {
+  outline: none;
+  white-space: pre-wrap;
+  word-break: break-word;
+  cursor: inherit;
+  min-height: 1.6em;
+}
+.note-card .check-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.note-card .check-item.done span {
+  text-decoration: line-through;
+  opacity: 0.55;
+}
+.note-card.dragging {
+  opacity: 0.93;
+  transform: scale(1.03);
+  cursor: grabbing;
+  z-index: 100;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.32);
+}
+.note-card.editing {
+  outline: 2px solid #4c8bf5;
+  outline-offset: 1px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.28);
+  cursor: text;
+  z-index: 200;
+}
+
+/* ===== 调试台 ===== */
+#debug-root {
+  display: none;
+}
+body.debug {
+  overflow: auto;
+  background: #1e1e2e !important;
+}
+body.debug #debug-root {
+  display: block;
+  padding: 18px 22px;
+  color: #cdd6f4;
+  font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+}
+body.debug h1 {
+  font-size: 20px;
+}
+body.debug h2 {
+  font-size: 15px;
+  margin: 18px 0 6px;
+  color: #a6e3a1;
+}
+body.debug .hint {
+  font-size: 13px;
+  line-height: 1.7;
+  color: #bac2de;
+  background: #313244;
+  border-radius: 8px;
+  padding: 10px 14px;
+}
+body.debug .toolbar {
+  display: flex;
+  gap: 8px;
+  margin: 12px 0;
+}
+body.debug button {
+  background: #45475a;
+  color: #cdd6f4;
+  border: 1px solid #585b70;
+  border-radius: 6px;
+  padding: 6px 12px;
+  cursor: pointer;
+}
+body.debug button:hover {
+  background: #585b70;
+}
+body.debug pre {
+  background: #11111b;
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-size: 12px;
+  overflow: auto;
+  max-height: 200px;
+  color: #f9e2af;
+}
