@@ -12,8 +12,10 @@
   - 已部署阿里云 VPS（Docker node:24，systemd 托管 `slip-sync`，公网 50000 已放行，每日 03:00 在线备份保留 14 份）
   - 生产冒烟已通过（`server/test/smoke.ts`，用真实 token 全链路验证）
   - 一键重新部署：`bash server/ops/deploy.sh`（改凭证/换机只改 `.env`）
-- **下一步：Win 画布窗口 spike**（五项验证：透明/置底/区域穿透/多显示器/全屏检测；失败则降级网格排列）
-  - 交接文档：[docs/handover-win-spike.md](docs/handover-win-spike.md)（五项验收标准、已知坑、环境准备、衔接提示）
+- **✅ 第二步已完成：Win 画布窗口 spike，门禁通过 → 保留画布方案**
+  - 透明/置底/区域穿透/全屏检测四项实测通过；多显示器代码就绪，待第二台 Win10 实机验证（作为任务三验收项）
+  - 实测记录 + 演示步骤 + 踩坑清单：[win/SPIKE.md](win/SPIKE.md)；工程 `win/`（Tauri v2，运行 `cd win && bash dev.sh`）
+- **下一步：Win 客户端（任务三）**——数据层 + journal + 同步引擎接服务器（`.env` 的 `SLIP_TOKEN_WIN1/WIN2`）+ local API(60000) + position 持久化（`content.position`）
 
 ## 阿里云服务器（同步中枢）与端口
 
@@ -21,7 +23,7 @@
 
 - **一键登录：`ssh slip`**（别名在 `~/.ssh/config`；密钥 `~/.ssh/id_slip`，公钥已装服务器，免密；密码仅备用）
 - `.env` 含：`SSH_HOST` / `SSH_PORT` / `SSH_USER` / `SSH_PASSWORD` / `SSH_KEY_PATH`（服务器连接）、`SLIP_SERVER_PORT` / `SLIP_LOCAL_PORT`（端口约定）
-- 端口（高位）：同步服务器 **50000**（公网；服务器防火墙已放行，**阿里云安全组待放行**）、Win 本地便签服务 **60000**（仅 127.0.0.1，AI 用 local API）
+- 端口（高位）：同步服务器 **50000**（公网；服务器防火墙已放行，**阿里云安全组已放行**——2026-08-13 实测公网 `GET /api/v1/health` 可达）、Win 本地便签服务 **60000**（仅 127.0.0.1，AI 用 local API）
 - 环境：CentOS 7（glibc 2.17 过老，Node 无法直跑）→ 同步服务跑 **Docker 容器 node:24**（见 GRILL-PLAN §10）
 - 改凭据/换机只改 `.env`，本文件不再重复任何细节
 
