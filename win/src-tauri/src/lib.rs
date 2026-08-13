@@ -22,9 +22,23 @@ fn bind_events(app: &tauri::AppHandle) {
     });
     canvas::push_event_id(app, id);
     let h = app.clone();
+    let id = app.listen("drag-layer-ready", move |e| {
+        if let Ok(p) = serde_json::from_str::<canvas::DragLayerReadyPayload>(e.payload()) {
+            canvas::handle_drag_layer_ready(&h, p);
+        }
+    });
+    canvas::push_event_id(app, id);
+    let h = app.clone();
     let id = app.listen("drag-start", move |e| {
-        if let Ok(p) = serde_json::from_str::<canvas::LabelPayload>(e.payload()) {
+        if let Ok(p) = serde_json::from_str::<canvas::DragStartPayload>(e.payload()) {
             canvas::handle_drag_start(&h, p);
+        }
+    });
+    canvas::push_event_id(app, id);
+    let h = app.clone();
+    let id = app.listen("drag-move", move |e| {
+        if let Ok(p) = serde_json::from_str::<canvas::DragMovePayload>(e.payload()) {
+            canvas::handle_drag_move(&h, p);
         }
     });
     canvas::push_event_id(app, id);
@@ -32,6 +46,13 @@ fn bind_events(app: &tauri::AppHandle) {
     let id = app.listen("drag-end", move |e| {
         if let Ok(p) = serde_json::from_str::<canvas::DragEndPayload>(e.payload()) {
             canvas::handle_drag_end(&h, p);
+        }
+    });
+    canvas::push_event_id(app, id);
+    let h = app.clone();
+    let id = app.listen("drag-cancel", move |e| {
+        if let Ok(p) = serde_json::from_str::<canvas::LabelPayload>(e.payload()) {
+            canvas::handle_drag_cancel(&h, p);
         }
     });
     canvas::push_event_id(app, id);

@@ -1,8 +1,8 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Capability for all slip windows (main + canvas-*)",
-  "windows": ["main", "canvas-*"],
+  "description": "Capability for all slip windows (main + canvas-* + drag-layer)",
+  "windows": ["main", "canvas-*", "drag-layer"],
   "permissions": [
     "core:default",
     "opener:default"

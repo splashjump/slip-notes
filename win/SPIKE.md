@@ -30,7 +30,7 @@ Get-Content -Wait $env:TEMP\tauri_dev.log   # Rust 侧日志
 | 5 | **全屏检测** | 任一程序全屏 → 画布隐藏；退出恢复；不靠轮询 | ✅ **通过** | `SetWinEventHook(EVENT_SYSTEM_FOREGROUND + EVENT_OBJECT_LOCATIONCHANGE)` 事件驱动。实测：调试台窗口全屏化 → `LOCATIONCHANGE(0,0,1920,1080)` → 画布隐藏；恢复尺寸 → 画布显示。前台窗口 rect ⊇ 显示器 rect 判定全屏（排除 Progman/WorkerW 桌面窗口） |
 
 **补充实测（通过）**：
-- 拖动便签：`drag-end` 坐标精确（(1080,140)→(1260,260)）；拖拽期间窗口放大到虚拟屏包围盒 + Rgn 清空（鼠标被捕获、卡片全程可见），拖完缩回本屏 + 重算 Rgn
+- 拖动便签：`drag-end` 坐标精确（(1080,140)→(1260,260)）；拖拽期间被拖便签显示在**拖拽层窗口**（全局一个隐藏的顶层小窗，`drag-layer` label）——画布窗口全程不动、区域不变，其他便签保持在桌面层，只有被拖便签浮在所有普通窗口之上；拖完拖拽层隐藏 + 原卡片在新位置重渲染
 - 编辑 + 键盘输入：点击卡片 → 窗口临时激活（`set_always_on_bottom(false)` + `set_focus`）→ contenteditable 输入 "ABC123" 成功上屏（注入点击实测；真实用户操作体验留人工复核）
 - 编辑失焦：点击卡片外 → 前台变化 → 自动回压 + 恢复 always_on_bottom
 
@@ -65,11 +65,12 @@ Get-Content -Wait $env:TEMP\tauri_dev.log   # Rust 侧日志
 
 ## 架构备忘（任务三直接沿用）
 
-- **窗口**：`canvas-N` 每显示器一个；创建 = `WebviewWindowBuilder`（transparent/decorations(false)/shadow(false)/always_on_bottom/skip_taskbar/resizable(false)/focused(false)）+ `WS_EX_TOOLWINDOW` + 初始空 Rgn
+- **窗口**：`canvas-N` 每显示器一个 + **`drag-layer` 全局一个**（拖动时显示被拖便签副本的顶层小窗，平时隐藏）；画布窗口创建 = `WebviewWindowBuilder`（transparent/decorations(false)/shadow(false)/always_on_bottom/skip_taskbar/resizable(false)/focused(false)）+ `WS_EX_TOOLWINDOW` + 初始空 Rgn；拖拽层 = 普通窗口（不置底），尺寸 = 卡片 + 30px 阴影边距（前端按自身 DPR 动态 setSize）
 - **坐标**：全链路物理像素、虚拟屏坐标系；前端 CSS px ↔ 物理 px 用 `devicePixelRatio` 换算；显示器归属 = 便签中心点落在哪个 rcMonitor
 - **线程**：主线程（tauri）+ watchdog 线程（拓扑检测/回压，800ms）+ WinEvent 消息泵线程（前台/全屏事件）
-- **状态**：`Arc<Mutex<Inner>>` 挂 tauri state；编辑宽容期 `editing_since`
-- **IPC**：前端 emit（canvas-init/update-regions/drag-start/drag-end/card-focus/card-blur）→ Rust listen（EventId 必须持有）；Rust → 前端 emit（notes-for-canvas/edit-end）
+- **状态**：`Arc<Mutex<Inner>>` 挂 tauri state；编辑宽容期 `editing_since`；拖拽层就绪/显示/DPR 状态
+- **IPC**：前端 emit（canvas-init/update-regions/drag-start/drag-move/drag-end/drag-cancel/card-focus/card-blur/drag-layer-ready）→ Rust listen（EventId 必须持有）；Rust → 前端 emit（notes-for-canvas/edit-end/drag-layer-show/drag-layer-shown）
+- **拖动流程**：pointerdown 记抓取偏移 → 移动超 4px → drag-start（便签物理位置）→ Rust 显示拖拽层（注入内容 + HWND_TOP + SHOWNOACTIVATE）→ 回执 drag-layer-shown → 前端隐藏原卡片 → 每帧 drag-move（rAF 节流）→ Rust 移动拖拽层（clamp 虚拟屏）→ 松手 drag-end（坐标更新 + 便签排末尾 + 隐藏拖拽层 + 全量重发）
 - **假数据**：`default_notes()`，重启重置
 
 ## 待办 / 遗留
@@ -97,3 +98,8 @@ Get-Content -Wait $env:TEMP\tauri_dev.log   # Rust 侧日志
 12. **checklist 卡片点击闪激活窗口**：无 `.text` 可编辑内容也进编辑态（勾选 checkbox 时窗口反复激活置顶）。修复：无可编辑正文不进编辑态。
 13. **调试台"隐藏"后无法恢复**：隐藏后没有任何入口能找回调试台。修复：改为最小化（任务栏可恢复）。
 14. **健壮性**：7 处 `inner.lock().unwrap()` 与 2 处 `HOOK_APP` 锁 unwrap 全部改为 `if let Ok`（毒锁不 panic）；移除 Cargo.toml 未用 feature；删除前端 `document.title` 调试残留。
+15. **拖动时便签被普通窗口遮挡**：画布窗口始终置底（`always_on_bottom` + watchdog 回压），拖动时窗口虽放大但 z-order 不动 → 便签拖到浏览器/资源管理器等窗口下方被遮住。修复：`drag-start` 时窗口抬升到最顶（先 `set_always_on_bottom(false)` 再 `SetWindowPos(HWND_TOP)`，否则 tao 会把非底部的置底窗口强制压回，见踩坑 #4；`SWP_NOACTIVATE` 不抢前台），`drag-end` 时恢复置底 + 回压。拖动期间窗口是前台，watchdog 不会误压。
+16. **拖动中断卡死状态**：`pointercancel`（系统夺走指针）时窗口停在"放大+抬升+无区域"状态，整屏透明窗口在最顶挡住鼠标。修复：前端 `pointercancel` → emit `drag-cancel` → Rust 缩回本屏 + 恢复置底 + 重发便签重算 Rgn。
+17. **拖动层级持久化**：拖完的便签移到 `notes` 数组末尾 → 重渲染时 DOM 顺序最后 = 同窗口内层级最高（"刚拖的置顶"），被它压住的便签解除遮挡。
+18. **拖动时全屏窗口闪现**（抬升生效后新引入）：`drag-start` 的 `clear_region` 把窗口区域全开（全矩形），而 tao 的 `set_always_on_bottom(false)` 内部会调用 `InvalidateRgn(整个窗口)` 强制整窗重绘（`window_state.rs`：flag 变化 → `SetWindowPos(HWND_NOTOPMOST)` + `InvalidateRgn(None)`，主线程内同步执行）——WM_PAINT 处理时窗口已抬到最顶、区域已清 → 整窗重绘。tao 透明实现 = `DwmEnableBlurBehindWindow`（空区域 blur 技巧），重绘间隙 DWM 合成未就绪时窗口以**不透明帧**显示 → 全屏闪现（偶发 = 合成器状态不定）。**治本：拖动期间区域永不全开**——删掉 `clear_region`，新增 `drag-move` 事件每帧上报所有卡片矩形（rAF 节流，Rust 侧 24px 膨胀容差 IPC 延迟）→ 区域随时跟随便签，任何重绘（InvalidateRgn/区域变化/resize）都被窗口区域裁剪在卡片矩形内 → 透明间隙最多闪卡片本身（不透明，无感）。另：`drag-end`/`drag-cancel` 改为**先压底再缩回**（restore 的 InvalidateRgn 重绘时区域仍是卡片并集；shrink 的 resize 合成间隙在底部被其他窗口遮住）。
+19. **拖动把所有便签提到最高**（抬升画布窗口的副作用）：窗口 z-order 是原子操作，同屏便签共享一个画布窗口，抬升 = 全部浮顶。**治本：拖拽层窗口方案**——新增全局 `drag-layer` 窗口（普通窗口、平时隐藏），拖动时把**被拖便签副本**注入拖拽层并 `HWND_TOP` 抬升，画布窗口全程不动（其他便签保持在桌面层）；拖动中每帧 `drag-move` 移动拖拽层（clamp 虚拟屏），松手 `drag-end` 隐藏拖拽层 + 坐标更新 + 重渲染。拖拽层是普通窗口（无 always_on_bottom flag）→ 无 tao 的 InvalidateRgn 问题，全屏闪现根源（#18）随之消失，`expand_for_drag`/`shrink_back`/`raise_for_drag`/`restore_after_drag` 整套删除。附带修复：`drag-layer-show` 内容注入按自身 DPR 换算尺寸；未就绪时降级（不隐藏原卡片、clamp 窗口内拖动）。

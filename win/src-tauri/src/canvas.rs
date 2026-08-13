@@ -27,7 +27,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     DispatchMessageW, GetClassNameW, GetForegroundWindow, GetMessageW, GetWindowLongPtrW,
     GetWindowRect, SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage,
     EVENT_OBJECT_LOCATIONCHANGE, EVENT_SYSTEM_FOREGROUND, GWL_EXSTYLE, GWL_STYLE,
-    HWND_BOTTOM, MSG, SET_WINDOW_POS_FLAGS, SW_HIDE, SW_SHOWNOACTIVATE,
+    HWND_BOTTOM, HWND_TOP, MSG, SET_WINDOW_POS_FLAGS, SW_HIDE, SW_SHOWNOACTIVATE,
     SWP_NOACTIVATE, SWP_NOZORDER, SWP_NOMOVE, SWP_NOSIZE, WINEVENT_OUTOFCONTEXT,
     WS_CAPTION, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
 };
@@ -74,6 +74,10 @@ pub struct Inner {
     pub fullscreen_hidden: Vec<String>,   // 因全屏而隐藏的画布 label
     /// 每画布窗口当前 DPR（由前端 canvas-init 上报）
     pub canvas_dpr: HashMap<String, f64>,
+    /// 拖拽层窗口状态：页面是否就绪 / 当前是否显示中 / 其 DPR（drag-layer-ready 上报）
+    pub drag_layer_ready: bool,
+    pub drag_layer_shown: bool,
+    pub drag_layer_dpr: Option<f64>,
     /// app.listen 的 EventId：必须持有否则监听器立即注销（Tauri v2 语义）
     pub event_ids: Vec<tauri::EventId>,
 }
@@ -246,7 +250,9 @@ pub fn apply_region(win: &tauri::WebviewWindow, rects: &[(f64, f64, f64, f64)], 
     }
 }
 
-/// 清除区域：恢复整个窗口矩形（用于拖拽期间捕获鼠标）
+/// 清除区域：恢复整个窗口矩形（已废弃：拖动期间区域改为跟随便签实时位置，
+/// 不再全开——全开区域 + tao 的 InvalidateRgn 整窗重绘 = DWM 透明间隙全屏闪现）
+#[allow(dead_code)]
 pub fn clear_region(win: &tauri::WebviewWindow) {
     let hwnd = match win.hwnd() {
         Ok(h) => h,
@@ -296,41 +302,41 @@ pub fn deactivate_editing(win: &tauri::WebviewWindow) {
     push_bottom(win);
 }
 
-/// 拖拽期间：窗口放大到虚拟屏包围盒，Rgn 清空（保证卡片拖动全程可见、鼠标被捕获）
-pub fn expand_for_drag(win: &tauri::WebviewWindow, vrect: &RECT) {
-    if let Ok(hwnd) = win.hwnd() {
-        set_pos(
-            hwnd,
-            None,
-            vrect.left,
-            vrect.top,
-            vrect.right - vrect.left,
-            vrect.bottom - vrect.top,
-            SWP_NOACTIVATE | SWP_NOZORDER,
-        );
-    }
-}
-
-/// 拖拽结束：窗口缩回所属显示器
-pub fn shrink_back(win: &tauri::WebviewWindow, rect: &RECT) {
-    if let Ok(hwnd) = win.hwnd() {
-        set_pos(
-            hwnd,
-            None,
-            rect.left,
-            rect.top,
-            rect.right - rect.left,
-            rect.bottom - rect.top,
-            SWP_NOACTIVATE | SWP_NOZORDER,
-        );
-    }
-}
+/// 拖拽层窗口：拖动期间显示被拖便签的副本（顶层小窗）。
+/// 画布窗口拖动期间完全不动 → 其他便签保持在桌面层，只有被拖便签浮在最顶。
+const DRAG_LAYER_MARGIN: f64 = 30.0; // 卡片阴影边距（CSS px），与 drag-layer.ts 一致
 
 pub fn hide_win(win: &tauri::WebviewWindow) {
     if let Ok(hwnd) = win.hwnd() {
         unsafe {
             let _ = ShowWindow(hwnd, SW_HIDE);
         }
+    }
+}
+
+/// 创建拖拽层窗口（全局一个，初始隐藏、屏幕外）。
+/// 普通窗口（不置底）：拖动时直接 SetWindowPos(HWND_TOP) 抬升，
+/// 无 tao always_on_bottom flag → 无 InvalidateRgn 整窗重绘问题。
+/// 窗口尺寸由前端按便签尺寸动态设置（见 drag-layer.ts）。
+fn create_drag_layer(app: &AppHandle) {
+    let r = WebviewWindowBuilder::new(app, "drag-layer", WebviewUrl::App("index.html".into()))
+        .title("slip-drag")
+        .position(-32000.0, -32000.0)
+        .inner_size(10.0, 10.0)
+        .decorations(false)
+        .transparent(true)
+        .shadow(false)
+        .skip_taskbar(true)
+        .resizable(false)
+        .focused(false)
+        .visible(false)
+        .build();
+    match r {
+        Ok(w) => {
+            apply_desk_style(&w);
+            hide_win(&w);
+        }
+        Err(e) => log::warn!("创建拖拽层窗口失败: {e}"),
     }
 }
 
@@ -456,9 +462,13 @@ impl Inner {
             editing_since: None,
             fullscreen_hidden: Vec::new(),
             canvas_dpr: Default::default(),
+            drag_layer_ready: false,
+            drag_layer_shown: false,
+            drag_layer_dpr: None,
             event_ids: Vec::new(),
         };
         inner.rebuild_canvases(app);
+        create_drag_layer(app);
         inner
     }
 
@@ -794,6 +804,11 @@ pub struct CanvasInitPayload {
 }
 
 #[derive(Deserialize)]
+pub struct DragLayerReadyPayload {
+    pub dpr: f64,
+}
+
+#[derive(Deserialize)]
 pub struct RegionRect {
     pub x: f64,
     pub y: f64,
@@ -808,8 +823,25 @@ pub struct UpdateRegionsPayload {
 }
 
 #[derive(Deserialize)]
-pub struct DragEndPayload {
+pub struct DragStartPayload {
     pub label: String,
+    pub id: String,
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
+}
+
+#[derive(Deserialize)]
+pub struct DragMovePayload {
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
+}
+
+#[derive(Deserialize)]
+pub struct DragEndPayload {
     pub id: String,
     pub x: f64,
     pub y: f64,
@@ -835,6 +867,19 @@ pub fn handle_canvas_init(app: &AppHandle, p: CanvasInitPayload) {
     }
 }
 
+/// 拖拽层前端就绪（页面加载完成 + 上报自身 DPR）→ 允许显示拖拽层
+pub fn handle_drag_layer_ready(app: &AppHandle, p: DragLayerReadyPayload) {
+    let Some(state) = app.try_state::<Arc<Mutex<Inner>>>() else {
+        return;
+    };
+    let inner = state.inner();
+    if let Ok(mut g) = inner.lock() {
+        g.drag_layer_ready = true;
+        g.drag_layer_dpr = Some(p.dpr);
+        log::info!("[spike] 拖拽层就绪 dpr={}", p.dpr);
+    }
+}
+
 /// 前端 update-regions：重算窗口区域（SetWindowRgn）
 pub fn handle_update_regions(app: &AppHandle, p: UpdateRegionsPayload) {
     let Some(state) = app.try_state::<Arc<Mutex<Inner>>>() else {
@@ -852,8 +897,58 @@ pub fn handle_update_regions(app: &AppHandle, p: UpdateRegionsPayload) {
     }
 }
 
-/// 前端 drag-start：窗口放大到虚拟屏 + 清空 Rgn
-pub fn handle_drag_start(app: &AppHandle, p: LabelPayload) {
+/// 前端 drag-start：显示拖拽层窗口（内容 = 被拖便签副本）并抬到最顶。
+/// 画布窗口不动 → 其他便签保持在桌面层，只有被拖便签浮在所有普通窗口之上。
+/// 拖拽层未就绪（首次拖动早于页面加载）→ 不回执，前端降级：不隐藏原卡片、
+/// clamp 在窗口内拖动（无抬升，便签可能被遮挡，仅启动后瞬间的极小概率）。
+/// 回执 drag-layer-shown 后前端才隐藏原卡片（避免双卡残影）。
+pub fn handle_drag_start(app: &AppHandle, p: DragStartPayload) {
+    let Some(state) = app.try_state::<Arc<Mutex<Inner>>>() else {
+        return;
+    };
+    let inner = state.inner();
+    let Ok(mut g) = inner.lock() else {
+        return;
+    };
+    if !g.drag_layer_ready {
+        return;
+    }
+    let Some(note) = g.notes.iter().find(|n| n.id == p.id).cloned() else {
+        return;
+    };
+    let Some(dl) = app.get_webview_window("drag-layer") else {
+        return;
+    };
+    let dpr = g.drag_layer_dpr.unwrap_or(1.0);
+    let margin = DRAG_LAYER_MARGIN * dpr; // 阴影边距（物理 px）
+    // 内容注入（物理尺寸 → 前端按自身 DPR 换算 CSS）
+    let _ = dl.emit(
+        "drag-layer-show",
+        serde_json::json!({ "note": note, "w": p.w, "h": p.h }),
+    );
+    // 定位（卡片左上角 - 边距）+ 抬升 + 显示；SWP_NOACTIVATE 不抢前台
+    if let Ok(hwnd) = dl.hwnd() {
+        set_pos(
+            hwnd,
+            Some(HWND_TOP),
+            (p.x - margin).round() as i32,
+            (p.y - margin).round() as i32,
+            (p.w + margin * 2.0).round() as i32,
+            (p.h + margin * 2.0).round() as i32,
+            SWP_NOACTIVATE,
+        );
+    }
+    show_win_noactivate(&dl);
+    g.drag_layer_shown = true;
+    // 回执：源窗口隐藏原卡片（视觉移交拖拽层）
+    if let Some(src) = app.get_webview_window(&p.label) {
+        let _ = src.emit("drag-layer-shown", ());
+    }
+}
+
+/// 前端 drag-move（拖动中每帧上报）：移动拖拽层窗口到便签新位置。
+/// clamp 到虚拟屏（便签不会丢出所有显示器之外）。
+pub fn handle_drag_move(app: &AppHandle, p: DragMovePayload) {
     let Some(state) = app.try_state::<Arc<Mutex<Inner>>>() else {
         return;
     };
@@ -861,10 +956,25 @@ pub fn handle_drag_start(app: &AppHandle, p: LabelPayload) {
     let Ok(g) = inner.lock() else {
         return;
     };
-    let vrect = g.virtual_rect;
-    if let Some(w) = app.get_webview_window(&p.label) {
-        expand_for_drag(&w, &vrect);
-        clear_region(&w);
+    if !g.drag_layer_shown {
+        return;
+    }
+    let v = g.virtual_rect;
+    let x = p.x.clamp(v.left as f64, (v.right as f64 - p.w).max(v.left as f64));
+    let y = p.y.clamp(v.top as f64, (v.bottom as f64 - p.h).max(v.top as f64));
+    if let Some(dl) = app.get_webview_window("drag-layer") {
+        let margin = DRAG_LAYER_MARGIN * g.drag_layer_dpr.unwrap_or(1.0);
+        if let Ok(hwnd) = dl.hwnd() {
+            set_pos(
+                hwnd,
+                None,
+                (x - margin).round() as i32,
+                (y - margin).round() as i32,
+                (p.w + margin * 2.0).round() as i32,
+                (p.h + margin * 2.0).round() as i32,
+                SWP_NOACTIVATE | SWP_NOZORDER,
+            );
+        }
     }
 }
 
@@ -883,17 +993,37 @@ pub fn handle_drag_end(app: &AppHandle, p: DragEndPayload) {
         n.w = p.w;
         n.h = p.h;
     }
-    // 源窗口缩回自己的显示器
-    if let Some(w) = app.get_webview_window(&p.label) {
-        if let Some(i) = canvas_index(&p.label) {
-            if let Some(m) = g.monitors.get(i) {
-                shrink_back(&w, &m.rect);
-            }
-        }
+    // 拖动的便签移到末尾 → 重渲染时 DOM 顺序最后 = 同窗口内层级最高（"刚拖的置顶"）
+    if let Some(pos) = g.notes.iter().position(|n| n.id == p.id) {
+        let n = g.notes.remove(pos);
+        g.notes.push(n);
     }
+    // 隐藏拖拽层（恢复原卡片显示由 emit_notes 重渲染完成）
+    if let Some(dl) = app.get_webview_window("drag-layer") {
+        hide_win(&dl);
+    }
+    g.drag_layer_shown = false;
     // 全量重发（简单可靠：每窗口拿自己屏内的便签，按中心点自动跨屏归属）
     let labels: Vec<String> = (0..g.monitors.len()).map(canvas_label).collect();
     g.emit_notes(app, &labels);
+    g.emit_state(app);
+}
+
+/// 前端 drag-cancel（pointercancel 兜底）：隐藏拖拽层 + 重发本屏便签
+/// （前端重渲染 → 原卡片恢复显示 → 重算 Rgn）。
+pub fn handle_drag_cancel(app: &AppHandle, p: LabelPayload) {
+    let Some(state) = app.try_state::<Arc<Mutex<Inner>>>() else {
+        return;
+    };
+    let inner = state.inner();
+    let Ok(mut g) = inner.lock() else {
+        return;
+    };
+    if let Some(dl) = app.get_webview_window("drag-layer") {
+        hide_win(&dl);
+    }
+    g.drag_layer_shown = false;
+    g.emit_notes(app, &[p.label.clone()]);
     g.emit_state(app);
 }
 
@@ -980,8 +1110,4 @@ pub fn push_event_id(app: &AppHandle, id: tauri::EventId) {
             g.event_ids.push(id);
         }
     }
-}
-
-fn canvas_index(label: &str) -> Option<usize> {
-    label.strip_prefix("canvas-").and_then(|s| s.parse::<usize>().ok())
 }

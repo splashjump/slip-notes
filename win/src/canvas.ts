@@ -1,29 +1,14 @@
 // 画布窗口前端逻辑：渲染便签、拖动、编辑、区域上报
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { emit, listen } from "@tauri-apps/api/event";
-
-interface CheckItem {
-  text: string;
-  done: boolean;
-}
-interface Note {
-  id: string;
-  x: number;
-  y: number;
-  w: number;
-  h: number;
-  color: string;
-  kind: string; // "text" | "checklist"
-  text: string;
-  items: CheckItem[];
-}
+import { buildCard, type Note } from "./card";
 
 const win = getCurrentWindow();
 const label = win.label;
 const dpr = window.devicePixelRatio;
 const canvasEl = document.getElementById("canvas-root") as HTMLElement;
 
-let winPhys = { x: 0, y: 0 }; // 窗口左上角物理坐标（虚拟屏系），拖拽期间窗口会扩到虚拟屏原点
+let winPhys = { x: 0, y: 0 }; // 窗口左上角物理坐标（虚拟屏系）。拖动不再放大窗口，坐标全程不变
 const cards = new Map<string, HTMLElement>();
 let editingId: string | null = null;
 
@@ -36,46 +21,6 @@ async function refreshWinPhys() {
 // 渲染
 // ---------------------------------------------------------------------------
 
-function buildCard(n: Note): HTMLElement {
-  const el = document.createElement("div");
-  el.className = "note-card";
-  el.style.background = n.color;
-  const css = toCss(n);
-  el.style.left = `${css.left}px`;
-  el.style.top = `${css.top}px`;
-  el.style.width = `${css.width}px`;
-  el.style.minHeight = `${css.height}px`;
-
-  if (n.kind === "checklist") {
-    const title = document.createElement("div");
-    title.className = "title";
-    title.textContent = n.text;
-    el.appendChild(title);
-    for (const it of n.items) {
-      const row = document.createElement("label");
-      row.className = "check-item" + (it.done ? " done" : "");
-      const cb = document.createElement("input");
-      cb.type = "checkbox";
-      cb.checked = it.done;
-      // pointerdown 已 preventDefault，click 里手动切换视觉
-      cb.addEventListener("click", (e) => {
-        e.stopPropagation();
-        row.classList.toggle("done", cb.checked);
-      });
-      const span = document.createElement("span");
-      span.textContent = it.text;
-      row.append(cb, span);
-      el.appendChild(row);
-    }
-  } else {
-    const text = document.createElement("div");
-    text.className = "text";
-    text.textContent = n.text.replace("\\n", "\n");
-    el.appendChild(text);
-  }
-  return el;
-}
-
 function toCss(n: Note) {
   return {
     left: (n.x - winPhys.x) / dpr,
@@ -86,8 +31,6 @@ function toCss(n: Note) {
 }
 
 async function renderNotes(notes: Note[]) {
-  // 窗口位置可能刚变过（拖拽结束 Rust 端 shrink_back 回原显示器），
-  // 必须重新读取，否则 toCss 用旧 winPhys 导致多屏下卡片错位。
   await refreshWinPhys();
   canvasEl.innerHTML = "";
   cards.clear();
@@ -96,7 +39,7 @@ async function renderNotes(notes: Note[]) {
     emit("card-blur", { label });
   }
   for (const n of notes) {
-    const el = buildCard(n);
+    const el = buildCard(n, toCss(n));
     bindPointer(el, n);
     canvasEl.appendChild(el);
     cards.set(n.id, el);
@@ -117,30 +60,41 @@ function reportRegions() {
 }
 
 // ---------------------------------------------------------------------------
-// 拖动 / 点击编辑
+// 拖动（拖拽层窗口模式）
 // ---------------------------------------------------------------------------
+// 拖动流程：pointerdown 记录抓取偏移 → 移动超 4px 后 emit drag-start（带便签
+// 当前物理位置）→ Rust 显示"拖拽层窗口"（顶层小窗，内容 = 便签副本）并回执
+// drag-layer-shown → 前端隐藏原卡片（视觉移交拖拽层）→ 拖动中每帧 drag-move
+// 上报物理位置 → Rust 移动拖拽层窗口 → 松手 drag-end（坐标更新 + 隐藏拖拽层 +
+// 重渲染）。画布窗口全程不动 → 其他便签保持在桌面层。
 
 interface DragState {
   id: string;
+  grabX: number; // pointerdown 时鼠标在卡片内的偏移（CSS px）
+  grabY: number;
   startX: number;
   startY: number;
-  origLeft: number;
-  origTop: number;
   moved: boolean;
+  w: number; // 卡片物理尺寸（隐藏后 offsetWidth 失效，必须缓存）
+  h: number;
 }
 
-function bindPointer(el: HTMLElement, n: Note) {
-  let drag: DragState | null = null;
+let drag: DragState | null = null;
+let dragLayerShown = false; // Rust 已显示拖拽层（回执到达）→ 可自由移动；否则降级 clamp 在窗口内
+let dragMovePending = false;
 
+function bindPointer(el: HTMLElement, n: Note) {
   el.addEventListener("pointerdown", (e) => {
     if (editingId) return; // 编辑中不允许拖动
     drag = {
       id: n.id,
+      grabX: e.clientX - el.offsetLeft,
+      grabY: e.clientY - el.offsetTop,
       startX: e.clientX,
       startY: e.clientY,
-      origLeft: el.offsetLeft,
-      origTop: el.offsetTop,
       moved: false,
+      w: el.offsetWidth * dpr,
+      h: el.offsetHeight * dpr,
     };
     el.setPointerCapture(e.pointerId);
     e.preventDefault(); // 防文本选择
@@ -153,41 +107,94 @@ function bindPointer(el: HTMLElement, n: Note) {
     if (!drag.moved && Math.hypot(dx, dy) > 4) {
       drag.moved = true;
       el.classList.add("dragging");
-      void emit("drag-start", { label }); // Rust：窗口放大到虚拟屏 + 清 Rgn
+      // 便签当前位置（物理）→ Rust 显示拖拽层窗口
+      const left = e.clientX - drag.grabX;
+      const top = e.clientY - drag.grabY;
+      dragLayerShown = false;
+      void emit("drag-start", {
+        label,
+        id: n.id,
+        x: winPhys.x + left * dpr,
+        y: winPhys.y + top * dpr,
+        w: drag.w,
+        h: drag.h,
+      });
     }
     if (drag.moved) {
-      // clamp 在窗口内：单屏时窗口=显示器（拖到屏幕边缘卡片完整停住、不被裁剪）；
-      // 多屏时 drag-start 后窗口已放大到虚拟屏，卡片可在各屏间自由移动。
-      const maxX = Math.max(0, window.innerWidth - el.offsetWidth);
-      const maxY = Math.max(0, window.innerHeight - el.offsetHeight);
-      const left = Math.min(Math.max(drag.origLeft + dx, 0), maxX);
-      const top = Math.min(Math.max(drag.origTop + dy, 0), maxY);
-      el.style.left = `${left}px`;
-      el.style.top = `${top}px`;
+      // 自由移动：拖拽层模式下由 Rust 端 clamp 到虚拟屏；
+      // 降级（拖拽层未就绪）时 clamp 在窗口内，避免卡片被窗口边缘裁剪。
+      const left = e.clientX - drag.grabX;
+      const top = e.clientY - drag.grabY;
+      if (!dragLayerShown) {
+        const maxX = Math.max(0, window.innerWidth - el.offsetWidth);
+        const maxY = Math.max(0, window.innerHeight - el.offsetHeight);
+        el.style.left = `${Math.min(Math.max(left, 0), maxX)}px`;
+        el.style.top = `${Math.min(Math.max(top, 0), maxY)}px`;
+      } else {
+        el.style.left = `${left}px`;
+        el.style.top = `${top}px`;
+      }
+      emitDragMove();
     }
   });
 
   el.addEventListener("pointerup", () => {
     if (!drag) return;
     const wasMoved = drag.moved;
+    const d = drag;
     drag = null;
     el.classList.remove("dragging");
     if (wasMoved) {
       void (async () => {
-        await refreshWinPhys(); // 窗口已放大到虚拟屏原点
-        const r = el.getBoundingClientRect();
+        await refreshWinPhys();
+        // 卡片可能已被拖拽层接管（display:none），getBoundingClientRect 失效，
+        // 位置/尺寸一律从缓存读
+        const left = parseFloat(el.style.left) || 0;
+        const top = parseFloat(el.style.top) || 0;
         void emit("drag-end", {
-          label,
           id: n.id,
-          x: winPhys.x + r.left * dpr,
-          y: winPhys.y + r.top * dpr,
-          w: r.width * dpr,
-          h: r.height * dpr,
+          x: winPhys.x + left * dpr,
+          y: winPhys.y + top * dpr,
+          w: d.w,
+          h: d.h,
         });
       })();
     } else {
       startEdit(el, n);
     }
+  });
+
+  // pointercancel（系统夺走指针）：拖拽层可能已显示，必须通知 Rust 隐藏 + 重渲染
+  el.addEventListener("pointercancel", () => {
+    if (!drag) return;
+    const wasMoved = drag.moved;
+    drag = null;
+    el.classList.remove("dragging");
+    if (wasMoved) void emit("drag-cancel", { label });
+  });
+}
+
+/// 拖动中：rAF 节流上报便签物理位置 → Rust 移动拖拽层窗口
+function emitDragMove() {
+  if (!drag || dragMovePending) return;
+  dragMovePending = true;
+  const el = cards.get(drag.id);
+  const w = drag.w;
+  const h = drag.h;
+  if (!el) {
+    dragMovePending = false;
+    return;
+  }
+  requestAnimationFrame(() => {
+    dragMovePending = false;
+    const left = parseFloat(el.style.left) || 0;
+    const top = parseFloat(el.style.top) || 0;
+    void emit("drag-move", {
+      x: winPhys.x + left * dpr,
+      y: winPhys.y + top * dpr,
+      w,
+      h,
+    });
   });
 }
 
@@ -238,6 +245,14 @@ async function init() {
   // Rust 检测到前台切走（编辑失焦）→ 强制退出编辑
   await listen("edit-end", () => {
     if (editingId) endEdit();
+  });
+  // Rust 回执：拖拽层窗口已显示 → 隐藏原卡片（视觉移交拖拽层）
+  await listen("drag-layer-shown", () => {
+    dragLayerShown = true;
+    if (drag) {
+      const el = cards.get(drag.id);
+      if (el) el.style.display = "none";
+    }
   });
   void emit("canvas-init", { label, dpr });
 }
