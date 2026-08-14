@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>方案一 · 智能纸堆墙 — 纸筏形态实验室</title>
+<link rel="stylesheet" href="../core.css">
+<style>
+/* demo 1 专属样式 */
+.note.editing { outline: 2px solid #4c8bf5; outline-offset: 1px; box-shadow: 0 6px 20px rgba(0,0,0,.28); cursor: text; z-index: 50; }
+.container.editing { outline: 2px solid #4c8bf5; outline-offset: 1px; }
+.collapse-btn {
+  position: absolute; top: 5px; right: 7px;
+  font-size: 11px; opacity: .3; cursor: pointer; z-index: 3;
+  font-family: var(--ui);
+  transition: opacity .15s;
+}
+.collapse-btn:hover { opacity: .9; }
+.note .cb { pointer-events: auto; }
+.stack-root { position: absolute; }
+</style>
+</head>
+<body>
+<script src="../core.js"></script>
+<script src="main.js"></script>
+</body>
+</html>

@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>方案三 · 分区展板 — 纸筏形态实验室</title>
+<link rel="stylesheet" href="../core.css">
+<style>
+#board {
+  position: absolute; inset: 0 0 42px 0;
+  display: flex; gap: 14px;
+  padding: 74px 20px 20px;
+}
+.col {
+  flex: 1; min-width: 0;
+  display: flex; flex-direction: column;
+  background: rgba(255,255,255,.38);
+  backdrop-filter: blur(8px);
+  border: 1px solid rgba(255,255,255,.5);
+  border-radius: 14px;
+  box-shadow: 0 6px 20px rgba(30,40,70,.08);
+}
+.col:nth-child(2) { background: rgba(255,240,210,.5); }
+.col:nth-child(4) { background: rgba(235,245,235,.5); }
+.col-head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 11px 14px 9px;
+  font-size: 13.5px; font-weight: 700; letter-spacing: 1px; color: #33415e;
+  border-bottom: 1px dashed rgba(90,110,150,.25);
+}
+.col-head .cnt {
+  margin-left: auto;
+  font-size: 11px; font-weight: 600; color: #6b7a99;
+  background: rgba(90,110,150,.12);
+  padding: 1px 8px; border-radius: 9px;
+}
+.col-body {
+  flex: 1; overflow-y: auto;
+  padding: 12px 12px 8px;
+  display: flex; flex-direction: column;
+}
+.col-body::-webkit-scrollbar { width: 4px; }
+.col-body::-webkit-scrollbar-thumb { background: rgba(90,110,150,.25); border-radius: 2px; }
+.container.mini { width: 100%; position: static; margin-bottom: 8px; }
+.container.mini .c-bar { margin-bottom: 2px; }
+.note.board .s-badge { position: absolute; top: -6px; right: -4px; }
+.note.board { cursor: grab; }
+.drop-stack { outline: 2px solid rgba(76,139,245,.9); outline-offset: 1px; }
+.drop-merge { outline: 2px solid rgba(226,74,74,.95); outline-offset: 1px; }
+</style>
+</head>
+<body>
+<script src="../core.js"></script>
+<script src="main.js"></script>
+</body>
+</html>

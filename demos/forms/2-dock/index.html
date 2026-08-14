@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>方案二 · 边缘收纳坞 — 纸筏形态实验室</title>
+<link rel="stylesheet" href="../core.css">
+<style>
+/* 收纳坞 */
+#dock {
+  position: fixed; top: 0; right: 0; bottom: 42px; width: 232px; z-index: 30;
+  background: rgba(28, 33, 48, .78);
+  backdrop-filter: blur(18px);
+  border-left: 1px solid rgba(255,255,255,.1);
+  border-bottom: 1px solid rgba(255,255,255,.06);
+  display: flex; flex-direction: column;
+  box-shadow: -8px 0 30px rgba(10,15,30,.18);
+}
+.dock-body { flex: 1; overflow-y: auto; padding: 10px 10px 14px; }
+.dock-body::-webkit-scrollbar { width: 4px; }
+.dock-body::-webkit-scrollbar-thumb { background: rgba(255,255,255,.18); border-radius: 2px; }
+.dock-head {
+  font-size: 11px; color: #9aa3b8; letter-spacing: 1px;
+  padding: 10px 4px 6px; display: flex; gap: 5px; align-items: center;
+  font-weight: 700;
+}
+.dock-strip {
+  position: static;
+  width: 100%; margin-bottom: 5px;
+  box-shadow: 0 2px 6px rgba(10,15,30,.25);
+  transition: transform .12s var(--spring);
+}
+.dock-strip:hover { transform: translateX(-3px); }
+.dock-strip.dim { opacity: .3; }
+
+/* 钉墙卡 */
+.unpin-btn {
+  position: absolute; top: 5px; right: 7px;
+  font-size: 12px; opacity: .3; cursor: pointer; z-index: 3;
+  transition: opacity .15s;
+}
+.unpin-btn:hover { opacity: .95; }
+
+/* 弹出预览 */
+.note.popout {
+  z-index: 35;
+  box-shadow: 0 12px 34px rgba(20, 30, 60, .35);
+}
+.popout-x {
+  position: absolute; top: 6px; right: 9px;
+  font-size: 12px; opacity: .35; cursor: pointer; z-index: 3;
+  font-family: var(--ui);
+}
+.popout-x:hover { opacity: .9; }
+.note.editing { outline: 2px solid #4c8bf5; outline-offset: 1px; }
+</style>
+</head>
+<body>
+<script src="../core.js"></script>
+<script src="main.js"></script>
+</body>
+</html>

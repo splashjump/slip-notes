@@ -15,7 +15,11 @@
 - **✅ 第二步已完成：Win 画布窗口 spike，门禁通过 → 保留画布方案**
   - 透明/置底/区域穿透/全屏检测四项实测通过；多显示器代码就绪，待第二台 Win10 实机验证（作为任务三验收项）
   - 实测记录 + 演示步骤 + 踩坑清单：[win/SPIKE.md](win/SPIKE.md)；工程 `win/`（Tauri v2，运行 `cd win && .\dev.ps1`）
-- **下一步：Win 客户端（任务三）**——数据层 + journal + 同步引擎接服务器（`.env` 的 `SLIP_TOKEN_WIN1/WIN2`）+ local API(60000) + position 持久化（`content.position`）
+- **✅ 第三步（形态决策）已定稿：档案馆形态**（2026-08-13 第二轮 grill + 双审）
+  - 形态：右缘边栏（档案馆）+ 桌面共存 + 传送门标记 + 聚合视图；互斥存在方式；动作层 = 用户/AI 统一输入抽象
+  - **权威计划：[win/FORM-PLAN.md](win/FORM-PLAN.md)**（GRILL-PLAN §7 的 Tauri 细化；决策日志 Q30）
+  - 对照 demo：`demos/forms/`（5 个形态 demo，纯前端；形态已定稿，仅供参考对照）
+- **下一步：形态先行 M0-M5**（见 [win/FORM-PLAN.md](win/FORM-PLAN.md)）——直接进 win/ 工程：CDP 基建 + 窗口三区化 → 动作层(Rust mock) + 边栏 → 桌面/传送门 → 档案格/归档链 → 视图/动效；**真实数据层 + journal + 同步引擎为 M5 后任务三内容（铁序不变）**
 
 ## 阿里云服务器（同步中枢）与端口
 
@@ -41,9 +45,10 @@
 ```
 slip-notes/
 ├── server/     # Node+TS 同步服务（先做）
-├── win/        # Tauri 客户端（spike 先行）
+├── win/        # Tauri 客户端（spike 先行；形态先行见 FORM-PLAN.md）
 ├── android/    # Kotlin 客户端
 ├── skill/      # pi skill
+├── demos/forms/  # 形态对照 demo（5 套，纯前端，与 win/ 隔离）
 └── docs/
 ```
 （目录随开发建立，npm 包作用域 `@slip/*`）

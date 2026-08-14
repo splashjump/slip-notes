@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>纸筏 · 形态实验室</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  min-height: 100vh;
+  font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+  background: linear-gradient(125deg, #dbe7ff 0%, #f6e8ff 32%, #ffe9f0 62%, #e3f7ee 100%);
+  background-size: 220% 220%;
+  animation: drift 26s ease-in-out infinite alternate;
+  display: flex; flex-direction: column; align-items: center;
+  padding: 56px 24px 40px;
+}
+@keyframes drift {
+  0% { background-position: 0% 0%; }
+  100% { background-position: 100% 100%; }
+}
+h1 { font-size: 30px; letter-spacing: 6px; color: #33415e; text-shadow: 0 2px 8px rgba(255,255,255,.6); }
+.sub { margin-top: 10px; font-size: 14px; color: #66739a; letter-spacing: 1px; text-align: center; line-height: 1.8; }
+.grid {
+  margin-top: 44px;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 380px));
+  gap: 20px;
+  width: 100%; max-width: 1180px;
+  justify-content: center;
+}
+.card {
+  display: block; text-decoration: none;
+  background: rgba(255,255,255,.55);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(255,255,255,.65);
+  border-radius: 18px;
+  padding: 20px 22px;
+  box-shadow: 0 8px 26px rgba(30,40,80,.1);
+  transition: transform .22s cubic-bezier(.22,1.2,.36,1), box-shadow .22s;
+}
+.card:hover { transform: translateY(-4px) rotate(-.4deg); box-shadow: 0 16px 40px rgba(30,40,80,.16); }
+.card .no { font-size: 12px; font-weight: 700; letter-spacing: 2px; color: #8b96b8; }
+.card .name { font-size: 19px; font-weight: 700; color: #2c3854; margin-top: 5px; letter-spacing: 1px; }
+.card .soul { font-size: 13px; color: #5d6a8e; margin-top: 8px; line-height: 1.7; }
+.card .go { margin-top: 14px; font-size: 12.5px; color: #4c8bf5; font-weight: 700; }
+.card.main { background: rgba(255,248,220,.75); border-color: rgba(220,190,120,.6); }
+.card.main .name { color: #6b5a24; }
+.foot { margin-top: 40px; font-size: 12px; color: #8a93a8; letter-spacing: .5px; }
+</style>
+</head>
+<body>
+<h1>纸筏 · 形态实验室</h1>
+<div class="sub">同一个数据、五种桌面形态 —— 叠放 · 合并 · 整齐 · 动效<br>纯前端 demo，双击即开，浏览器体验</div>
+
+<div class="grid">
+  <a class="card main" href="1-paper-stack/index.html">
+    <div class="no">方案一 · 最完善</div>
+    <div class="name">智能纸堆墙</div>
+    <div class="soul">拖 = 移动（磁吸对齐）· 快速松手 = 叠放成堆 · 停留 800ms = 合并（九宫格递归分割）· 旧便签自动折叠成条 · 今日聚合卡 · FLIP 全程丝滑</div>
+    <div class="go">→ 打开完整版</div>
+  </a>
+
+  <a class="card" href="2-dock/index.html">
+    <div class="no">方案二</div>
+    <div class="name">边缘收纳坞</div>
+    <div class="soul">所有便签收纳为右缘紧凑条（占位最小）· 点条弹出预览 · 拖出钉墙 · 拖回收纳 · Dock 快速弹跳手感</div>
+    <div class="go">→ 打开</div>
+  </a>
+
+  <a class="card" href="3-board/index.html">
+    <div class="no">方案三</div>
+    <div class="name">分区展板</div>
+    <div class="soul">收件箱 / 今日 / 进行中 / 归档四列 · 自动分区 · 拖拽换列 FLIP 重排 · 勾满自动归档 · 叠放合并同款</div>
+    <div class="go">→ 打开</div>
+  </a>
+
+  <a class="card" href="4-timeline/index.html">
+    <div class="no">方案四</div>
+    <div class="name">时间流</div>
+    <div class="soul">时间即秩序 · 新鲜(<1天)大卡 → 近期中卡 → 旧卡标题条 · 完成/逾期自动沉入抽屉 · 零整理成本</div>
+    <div class="go">→ 打开</div>
+  </a>
+
+  <a class="card" href="5-deck-desktop/index.html">
+    <div class="no">方案五</div>
+    <div class="name">纸堆桌面</div>
+    <div class="soul">桌面只剩堆 · 按颜色归堆显示顶卡 · 悬停扇形展开（边缘防溢出）· 点击摊开 · 拖出成新堆 · 今日堆常驻左上</div>
+    <div class="go">→ 打开</div>
+  </a>
+</div>
+
+<div class="foot">每个 demo 均预置 28 张便签 · 上限常量 MAX_PANES = 9（九宫格）在各自 main.js 顶部 · 想改数字改一处即可</div>
+</body>
+</html>

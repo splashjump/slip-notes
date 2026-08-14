@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>方案五 · 纸堆桌面 — 纸筏形态实验室</title>
+<link rel="stylesheet" href="../core.css">
+<style>
+.deck { position: absolute; width: 220px; z-index: 2; }
+.deck .note { width: 220px; }
+.deck-label {
+  position: absolute; left: 0; right: 0; top: calc(100% + 10px);
+  text-align: center;
+  font-size: 11.5px; letter-spacing: 2px; color: #55638a;
+  font-weight: 700;
+  text-shadow: 0 1px 3px rgba(255,255,255,.8);
+  font-family: var(--ui);
+}
+.deck-today { width: 240px; }
+.drop-stack { outline: 2px solid rgba(76,139,245,.9); outline-offset: 2px; border-radius: 12px; }
+.note.editing { outline: 2px solid #4c8bf5; outline-offset: 1px; }
+</style>
+</head>
+<body>
+<script src="../core.js"></script>
+<script src="main.js"></script>
+</body>
+</html>
