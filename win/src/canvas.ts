@@ -7,7 +7,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { buildCard } from "./card";
 import { actions, act, newBatch, defaultTimed } from "./api";
 import {
-  getState,
+  onState,
   initState,
   deskNotes,
   isDesk,
@@ -54,6 +54,8 @@ let editingId: string | null = null;
 
 interface DragState {
   id: string;
+  pointerId: number; // 用于视图关闭后重建桌面卡时重新捕获指针（capture 随旧元素销毁）
+  viewRebuilt: boolean; // 视图拖出后已重建为桌面卡（后续渲染按常规 skip 保留）
   grabX: number;
   grabY: number;
   startX: number;
@@ -82,6 +84,7 @@ interface DragState {
 let drag: DragState | null = null;
 let dragLayerShown = false;
 let dragMovePending = false;
+let pressedId: string | null = null; // 按下的卡：任何渲染都保留（勾选框点击不创建 drag，同样怕重建吞 click）
 
 function noteGlobalRect(d: DragState): { x: number; y: number; w: number; h: number } {
   return { x: winPhys.x + d.curLeft * dpr, y: winPhys.y + d.curTop * dpr, w: d.w, h: d.h };
@@ -120,15 +123,31 @@ function renderDesk() {
   if (!st) return;
   // 拖拽中/编辑中的卡不重渲染（动作响应期间保持 DOM 不被打断；
   // 否则 card-focus 的状态事件会重建编辑卡，丢掉 .editing 与焦点）
-  const skipId = drag?.moved ? drag.id : editingId ?? null;
+  // 按下的卡同样保留：任何 state 事件落在按下/释放之间都会重建卡片，
+  // 浏览器对跨重建的 down/up 不合成 click → 点击丢失（B4）
+  // 视图拖出例外：视图关闭后需把被拖卡重建为桌面卡以继续手势（viewRebuilt 后按常规 skip）
+  const mustRebuild = !!drag && drag.moved && drag.viewDrag && !drag.viewRebuilt;
+  const skipId = mustRebuild ? editingId ?? null : pressedId ?? (drag ? drag.id : editingId ?? null);
+  const d = drag; // 局部引用：renderDesk 同步执行，等价模块级 drag（供 TS 收窄）
   const notes = deskNotes(st, myMon).filter((n) => n.id !== skipId);
   const frag = document.createDocumentFragment();
+  let rebuiltEl: HTMLElement | null = null;
   for (const n of notes) {
-    const el = buildCard(n, cardCss(n), {
+    const rebuildDrag =
+      !!d && d.moved && d.viewDrag && !d.viewRebuilt && !st.view && n.id === d.id;
+    const css = rebuildDrag
+      ? { left: d.curLeft, top: d.curTop, width: n.w / dpr, height: n.h / dpr }
+      : cardCss(n);
+    const el = buildCard(n, css, {
       expanded: expanded.has(n.id),
       unconfirmed: st.ephemeral.unconfirmed.includes(n.id),
     });
     el.dataset.id = n.id;
+    if (rebuildDrag) {
+      // 视图关闭 → 被拖卡重建为桌面卡（隐藏与重捕获在入文档后按序执行，见下）
+      d.viewRebuilt = true;
+      rebuiltEl = el;
+    }
     bindCard(el, n);
     frag.appendChild(el);
   }
@@ -137,6 +156,24 @@ function renderDesk() {
   });
   canvasEl.querySelector(".view-overlay")?.remove(); // 视图关闭
   canvasEl.appendChild(frag);
+  // 重建卡接续拖拽：必须先捕获（可见元素）再隐藏——对 display:none 元素
+  // setPointerCapture 会静默失效（不抛异常），后续 move/release 全部落空 →
+  // drag 冻结 + 拖拽层永远悬挂（安静机器必现）；且必须在入文档后（离树静默失败）
+  if (rebuiltEl && d) {
+    try {
+      rebuiltEl.setPointerCapture(d.pointerId);
+      rebuiltEl.style.display = "none"; // 拖拽层窗口仍是视觉主体
+    } catch {
+      // 指针已结束（release 已在窗口期送达）→ 主动收尾，防复合卡死：
+      // drag 非空 + viewRebuilt + 隐藏卡会让 onState 兜底与 pointerdown 自愈都失效
+      if (drag) {
+        drag = null;
+        dragLayerShown = false;
+      }
+      rebuiltEl.style.display = "";
+      void emit("drag-cancel", { label });
+    }
+  }
   ensurePortal();
 }
 
@@ -197,6 +234,10 @@ function flashSlot(slot: number) {
 
 function renderView() {
   if (!st?.view) return;
+  // 视图打开/更新前先提交进行中的编辑（否则全量重建会丢未提交文本 + editingId 残留）
+  if (editingId) endEdit();
+  // B4 同型：视图内全量重建会吞按下的 click——按下的卡不重建，等释放后的下一次事件
+  if (pressedId) return;
   const name = st.view.name;
   canvasEl.querySelectorAll(".note-card").forEach((el) => el.remove());
   ensurePortal();
@@ -273,14 +314,28 @@ function layoutViewBody(name: string) {
 
 function bindCard(el: HTMLElement, n: Note) {
   el.addEventListener("pointerdown", (e) => {
+    pressedId = n.id; // 按下的卡在任何渲染中保留（勾选框点击不创建 drag，同样怕重建吞 click）
     if (editingId) return;
-    if (drag) return;
+    // 陈腐拖拽自愈：被拖元素若已被移除（pointer capture 随之销毁 → pointerup 丢失）
+    // 或拖拽超时未动，先取消旧拖拽再开始新手势，防止 drag 卡死吞掉全部后续手势
+    if (drag) {
+      const staleEl = canvasEl.querySelector(`[data-id="${drag.id}"]`);
+      if (!staleEl || performance.now() - drag.t0 > 30_000) {
+        drag = null;
+        dragLayerShown = false;
+        void emit("drag-cancel", { label });
+      } else {
+        return;
+      }
+    }
     const target = e.target as HTMLElement;
     if (target.closest(".check-item")) return;
     // 取消可能卡住的 FLIP 动画（残留 transform 会破坏命中测试）
     for (const a of el.getAnimations()) a.cancel(); // 勾选走 click
     drag = {
       id: n.id,
+      pointerId: e.pointerId,
+      viewRebuilt: false,
       grabX: e.clientX - el.offsetLeft,
       grabY: e.clientY - el.offsetTop,
       startX: e.clientX,
@@ -321,6 +376,7 @@ function bindCard(el: HTMLElement, n: Note) {
   });
 
   el.addEventListener("pointerup", (e) => {
+    if (pressedId === n.id) pressedId = null;
     if (!drag || drag.id !== n.id) return;
     const d = drag;
     drag = null;
@@ -333,6 +389,7 @@ function bindCard(el: HTMLElement, n: Note) {
   });
 
   el.addEventListener("pointercancel", () => {
+    if (pressedId === n.id) pressedId = null;
     if (!drag || drag.id !== n.id) return;
     const wasMoved = drag.moved;
     drag = null;
@@ -361,11 +418,13 @@ function beginDrag(e: PointerEvent) {
   el.classList.add("dragging");
   drag!.curLeft = e.clientX - drag!.grabX;
   drag!.curTop = e.clientY - drag!.grabY;
-  // 视图内拖出：时间线（崩塌）/ 最近（关闭视图）
+  // 视图内拖出：时间线（超过阈值后崩塌）/ 最近（立即关闭视图）——
+  // 两者都置 viewDrag：视图关闭渲染会把被拖卡重建为桌面卡继续手势（B2），
+  // 且拖出全程 portal 挂起（与“视图打开时刷卡被挂起”语义一致）
   if (viewOpen() && st?.view) {
+    drag!.viewDrag = true;
     if (st.view.name === "timeline") {
       // 80px 阈值由 moveDrag 判定（需要先积累位移）
-      drag!.viewDrag = true;
     } else {
       // 最近：拖出 = 变桌面态 + 整个视图关闭
       const name = st.view.name;
@@ -784,8 +843,10 @@ async function init() {
         h: el.offsetHeight,
       })),
   };
-  await listen("state", () => {
-    st = getState();
+  // 事件序纪律：state.ts 的 initState 是唯一 listen("state") 注册点，
+  // 窗口一律 onState 订阅拿最新载荷（tauri 监听器 LIFO，自行 listen 会读旧缓存）
+  onState((s) => {
+    st = s;
     // 全屏隐藏/恢复、视图开合、拓扑重建 → 重新对齐窗口物理位置后再渲染。
     // R3：必须 await 完成再 render（render 用 winPhys 换算卡片位置）；
     // 渲染序号防重入：并发 state 事件时只由最新一次执行渲染。
@@ -796,6 +857,16 @@ async function init() {
       }
       if (mySeq !== renderSeq) return; // 已有更新的 state 事件，本次作废
       render();
+      // 兜底：渲染可能移除被拖卡元素（视图关闭/切换等）→ 其 pointer capture 随元素
+      // 销毁而丢失，pointerup 不会再到达 → 主动取消拖拽，防止 drag 卡死（安静机器必现）
+      if (drag) {
+        const live = canvasEl.querySelector(`[data-id="${drag.id}"]`);
+        if (!live) {
+          drag = null;
+          dragLayerShown = false;
+          void emit("drag-cancel", { label });
+        }
+      }
     })();
   });
   await listen("drag-layer-shown", () => {
@@ -850,6 +921,19 @@ async function init() {
   document.addEventListener("pointerdown", (e) => {
     if (editingId && !(e.target as HTMLElement).closest(".note-card.editing")) {
       endEdit();
+    }
+  });
+  // pressedId 兜底清理：释放落在卡片外/其它窗口时无卡片 pointerup，
+  // 由 document 级 pointerup 统一清（卡自身的 handler 先清，此处幂等）
+  document.addEventListener("pointerup", () => {
+    pressedId = null;
+    // 兜底：重建卡重捕获失败时（释放落回文档而非卡片），清理冻结的视图拖出——
+    // 防拖拽层永远悬挂 + 后续手势被吞（正常路径卡 handler 先置 drag=null，此处幂等）
+    if (drag?.viewDrag && drag.viewRebuilt) {
+      drag = null;
+      dragLayerShown = false;
+      void emit("drag-clear", {});
+      void emit("drag-cancel", { label });
     }
   });
   void emit("canvas-init", { label, dpr });

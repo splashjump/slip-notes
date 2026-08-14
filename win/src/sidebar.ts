@@ -5,7 +5,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { emit, listen } from "@tauri-apps/api/event";
 import { actions, newBatch, act } from "./api";
 import {
-  getState,
+  onState,
   initState,
   archiveFlat,
   archiveSlots,
@@ -407,6 +407,7 @@ async function toggleView(name: string) {
 
 interface EntryDrag {
   id: string;
+  el: HTMLElement; // 被按元素引用：全量重建后旧元素销毁（capture 释放）用 isConnected 判定
   grabX: number;
   grabY: number;
   startX: number;
@@ -427,6 +428,7 @@ function bindEntry(entry: HTMLElement) {
     if (t.closest(".unconfirmed-dot") || t.closest(".del-btn")) return;
     entryDrag = {
       id,
+      el: entry,
       grabX: e.clientX - entry.offsetLeft,
       grabY: e.clientY - entry.offsetTop,
       startX: e.clientX,
@@ -670,10 +672,18 @@ function reportRegions() {
 async function init() {
   await refreshWinPhys();
   await initState();
-  await listen("state", () => {
-    st = getState();
+  // 事件序纪律：唯一 listen("state") 在 state.ts；窗口一律 onState 订阅拿最新载荷
+  onState((s) => {
+    st = s;
     void refreshWinPhys();
     render();
+    // 兜底：render 全量重建 DOM，若拖拽中的条目元素已被销毁 → 取消拖拽
+    // （否则 pointerup 丢失，Rust 侧 ephemeral.dragging 永久卡住）
+    if (entryDrag && !entryDrag.el.isConnected) {
+      entryDrag = null;
+      void emit("drag-clear", {});
+      void emit("drag-cancel", { label });
+    }
   });
   // 拖拽层接管（条目/成员拖出）
   await listen("drag-layer-shown", () => {

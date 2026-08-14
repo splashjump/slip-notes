@@ -1,6 +1,6 @@
 # 形态先行 M0–M4 · 完成报告 + Reviewer 审查报告
 
-> 日期：2026-08-14 · 状态：**审查报告 R1-R3/Y1-Y10/G1-G10 已全部修复（2026-08-14 第二轮）**，待冒烟复跑 + M5 体感验收
+> 日期：2026-08-14 · 状态：**审查报告 R1-R3/Y1-Y10/G1-G10 已全部修复（第二轮）**；**无人机器干净复跑 + 新发现 B1-B4 修复完成（第三轮）**，冒烟连续 25 轮全绿
 > 项目：纸筏 slip-notes · win/ 工程（FORM-PLAN.md 形态先行）
 
 ---
@@ -182,3 +182,95 @@ chips 关闭后其 Rgn 矩形残留 → 该区域点击被窗口拦截（穿透�
 - journal 上限 1000 条（丢最老）；`__batch` 在 dispatch 层剥离，不进 journal。
 - 调试钩子保留：`window.__slipDebug.dragInfo()/st()/winPhys()/cardRects()`（手势排查用）。
 - 临时诊断文件 `tests/debug-check.mjs` 已删除；如需复现手势问题可照它重建。
+
+---
+
+## 第五部分 · 无人机器干净复跑记录（2026-08-14 第三轮）
+
+**结论：4.3 待办 #1 完成。冒烟在无人机器上连续 3 轮全绿；复跑过程发现并修复 2 个真实 bug（此前本机受并行操作干扰未能暴露）+ 1 处测试脆弱点。**
+
+### 5.1 验证结果（无人机器，1 屏 1920×1080@165）
+
+| 验证项 | 结果 |
+|---|---|
+| Rust 单测 | ✅ 13/13 |
+| `tsc --noEmit` | ✅ 零错误 |
+| CDP 冒烟（~70 检查） | ✅ 连续 25 轮全绿（B1-B4 修复后） |
+| 多屏实机验证 | ⚠️ 本机仅 1 屏（第二屏未接），留待第二台 Win10 实机 |
+
+### 5.2 本轮发现并修复的 bug（真实、确定性、此前被掩盖）
+
+**B1（🔴 严重）：tauri 事件监听器 LIFO 执行序 → 渲染永远滞后一拍。**
+
+- 现象：无人机器上冒烟 T1 首个手势 `waitNoteAt` 必超时；探针证实：state 事件到达（缓存有 23 张）、每次事件后有一次渲染，但 DOM 永远少最新事件的卡；隔一个事件后才补上。
+- 根因：tauri v2 的 `listen` 监听器按 **LIFO**（后注册先执行）调用。各窗口先 `await initState()`（state.ts 注册监听器，更新 `cur` 缓存），再自行 `listen("state", () => { st = getState(); ... })`——窗口监听器先跑，读到的是**上一个事件**的旧缓存 → 渲染落后一拍。有人机器上用户操作产生额外事件流，把滞后掩盖掉了。
+- 修复：state.ts 的 `initState()` 成为唯一 `listen("state")` 注册点；canvas/sidebar/debug 全部改走 `onState` 订阅（回调参数即最新载荷，不再读缓存）。state.ts 加纪律注释。
+
+**B2（🔴 严重）：时间线拖出崩塌视图中途关闭 → 被拖卡元素被移除 → pointerup 丢失 → drag 状态永久卡死。**
+
+- 现象：上一轮冒烟的时间线崩塌失败会把 `drag` 卡死留在模块里，下一轮所有手势被 `if (drag) return` 吞掉（T1 全挂）；探针证实 release 后 `dragInfo` 仍非 null。
+- 根因：时间线拖出 → `act(view close)` → 渲染移除 `.view-overlay`（含被拖卡）→ 被拖卡 pointer capture 随元素销毁 → pointerup 不再到达卡片监听器 → `drag` 不清理。
+- 修复（多层）：
+  1. canvas `onState` 渲染后兜底：被拖元素已不在 DOM → 取消拖拽 + `drag-cancel`（Rust 清 `ephemeral.dragging` + 隐藏拖拽层）；
+  2. canvas `pointerdown` 自愈：陈旧拖拽（元素已移除或超 30s）先取消再开始新手势；
+  3. sidebar `onState` 对 entryDrag 同型兜底（元素引用 `isConnected` 判定）；
+  4. **拖出语义恢复**（reviewer 🟡）：视图关闭渲染时把被拖卡**重建为桌面卡**（落位拖拽当前位置、隐藏、重新 `setPointerCapture`——必须在元素入文档后调用，否则静默失败），拖拽无缝继续、落点正常提交（`drag_end` 定位、dock→store）。
+
+**B3（🔴 严重）：「锁内快照 payload → 锁外慢 Win32 → 再 emit」的陈旧快照回退（编辑提交偶发被旧文本覆盖的根因）。**
+
+- 现象：冒烟 T1c 编辑偶发超时；探针证实：endEdit 正确读到新文本并调用 editText（store 已更新），但 9ms 后一次渲染把卡片重建为**旧文本**、前端缓存被旧快照回退（用户编辑未丢，UI 被回退）。
+- 根因：`handle_card_blur` 等 handler 在锁内构建 payload → 锁外执行 `deactivate_editing`/`hide_win`（Win32，慢）→ 期间 editText 提交完成 → handler 最后 emit 的**旧快照**覆盖前端。同型共 5 处。
+- 修复：`handle_card_blur`/`handle_card_focus`/`handle_drag_end`/`handle_drag_cancel`/setup 初始 fg 处理——锁内只改状态并记录小标记，慢工作完成后**重新构建** payload 再 emit。
+
+**B4（🟡 重要）：state 事件落在按下/释放之间 → 卡片重建 → click 不合成（勾选偶发失效）。**
+
+- 现象：冒烟 T1c 勾选偶发超时（~10%）。探针证实：按下后 4-6ms 到达的 state 事件（自动收回 tick / card-blur 延迟 emit）触发全量重建，down/up 跨元素 → 浏览器不合成 click。
+- 修复：
+  1. 产品层：新增 `pressedId`——所有按下的卡在渲染中保留（勾选框按下不创建 drag，此前 skip 保护不到）；
+  2. 测试层：prefly `debug.reset` 后**等 n14 自动收回落定**（tick ≤30s 必然归档 n14 并广播）；
+  3. 测试层：勾选改安全重试（未勾选才重点、每次重读位置、防止双重切换）。
+
+**T1（测试脆弱点）：时间线首卡选择。**
+
+- 现象：T1c 勾选 n2 会 bump `updated_at` → n2（清单卡）成为时间线首卡 → 拖拽起点（卡中心）命中 `.check-item` → `pointerdown` 被忽略 → 崩塌测试必挂。
+- 修复：冒烟改为选第一张“文本卡”（无 `.check-item`、非合并容器）。
+
+### 5.3 验证（第三轮修复后）
+
+- Rust 单测 13/13 ✅ · `tsc --noEmit` 零错误 ✅ · **冒烟连续 25 轮全绿 ✅**（含 B1-B4 修复后的多轮回归；此前偶发的编辑/勾选抖动已消除）
+- 验证过程中确认种子数据仅 n14 为 40 天旧（其余 1-5 天），自动收回 tick 只归档 n14；pre-wait 不影响其余测试。
+
+### 5.4 遗留
+
+- M5 多屏实机验证（跨屏拖出等）需第二台 Win10 实机/第二屏接入；本机单屏，冒烟已覆盖 1 屏主链路。
+- 体感验收清单（FORM-PLAN §13.4）需人工体验，留待用户。
+- 下一步：任务三（真实数据层 + journal + 同步引擎；action.rs 接口已留好，local API 60000 = HTTP 薄包装 dispatch）。
+
+### 5.5 第二轮 reviewer 复审与修复（2026-08-14）
+
+第二轮 reviewer 复审结论：无 🔴，四个 🟡 + 五个 🟢，全部已修复：
+
+| 编号 | 修复 |
+|---|---|
+| 🟡1 | `setPointerCapture` 失败（指针在重建窗口期结束）时的 catch 不再只是吞异常：主动收尾（drag=null、隐藏卡恢复显示、drag-cancel）——否则 drag 非空 + viewRebuilt + 隐藏卡会让 onState 兜底与 pointerdown 自愈双双失效，复合卡死最长达 30s |
+| 🟡2 | **recent 视图拖出与时间线对齐**：`beginDrag` 对任何视图拖出都置 `viewDrag=true` → 拖出重建继续手势 + 全程 portal 挂起；不再走“兜底取消”丢弃用户拖动意图 |
+| 🟡3 | **B4 同型漏网（视图内勾选）**：`renderView` 按下中不重建（pressedId 非空则跳过），释放后下一次事件自然重建 |
+| 🟡4 | **编辑期开视图丢未提交文本**：`renderView` 先 `if (editingId) endEdit()` 再重建——提交文本 + 清 editingId，消除视图内首次按卡被拦截 |
+| 🟢1 | flip.ts `capture()` 跳过 display:none 元素（拖出重建隐藏卡不再产生从原点飞入的假动画） |
+| 🟢2 | document 级 pointerup 兜底清 `pressedId`（释放落在卡片外时不留残值冻结卡片） |
+| 🟢3 | 冒烟 prefly 用 `debug.autoArchive` 确定性触发 n14 归档（替代 ≤30s 的 waitFor，每轮快 15-30s，效果等价） |
+| 🟢4 | 清理临时探针文件（probe-*.mjs 已删） |
+| 🟢5 | `handle_drag_cancel` 死代码 `let _ = p;` 移除（参数改 `_p`，零警告） |
+
+**B5（扫尾阶段发现）：重建卡重捕获在 display:none 元素上静默失效。**
+
+- 现象：最终验证时上一轮冒烟把拖拽卡死留在页面（dragInfo 非 null、拖拽层永远悬挂），下一轮 T1 手势被吞。
+- 根因：重建卡先 `display:none` 再 `setPointerCapture`——对已隐藏元素重捕获**静默失效且不抛异常**（桌面拖拽正常是因为“先捕获后隐藏”的顺序）。捕获失效后 move/release 全部落空，drag 冻结在重建点、拖拽层永不收起；卡自身因 pressedId/skipId 被永久保留，onState 兜底与 pointerdown 自愈都检测不到“元素存在”。
+- 修复：
+  1. 顺序改为**入文档 → setPointerCapture（可见）→ display:none**；
+  2. catch 分支主动收尾（drag=null、恢复显示、drag-cancel）；
+  3. document 级 pointerup 兜底：viewDrag+viewRebuilt 时若释放落回文档（捕获失败），清理冻结拖拽（正常路径卡 handler 先置 drag=null，幂等）。
+
+**验证：Rust 单测 13/13 · tsc 零错误 · cargo check 零警告 · CDP 冒烟连续 30 轮全绿（B5 修复后累计 60+ 轮）· 跨轮拖拽状态无泄漏 ✅**
+
+（第二轮 reviewer 确认无误项：B3 五处 handler 语义与锁纪律、B4 mustRebuild/pressedId 优先级与 pointercancel 覆盖、B2 重建顺序、冒烟重试无双重切换、pre-wait 与种子数据相容性、时间线文本卡选择器与 card.ts 一致。）

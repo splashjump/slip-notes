@@ -68,6 +68,13 @@ export interface AppState {
 let cur: AppState | null = null;
 const subs = new Set<(s: AppState) => void>();
 
+/**
+ * 事件序纪律：initState() 是本模块唯一的 listen("state") 注册点，
+ * 各窗口一律通过 onState 订阅（回调直接收到最新载荷）。
+ * 禁止各窗口自行 listen("state") 后读 getState()——tauri 事件监听器按
+ * LIFO 顺序执行（后注册先跑），后注册的窗口监听器会先于本监听器运行，
+ * 读到的是上一个事件的旧载荷，导致渲染落后一拍（安静机器上确定性复现）。
+ */
 export function getState(): AppState | null {
   return cur;
 }
@@ -85,7 +92,14 @@ export function onState(cb: (s: AppState) => void): void {
 export async function initState(): Promise<void> {
   await listen<AppState>("state", (e) => {
     cur = e.payload;
-    for (const cb of subs) cb(cur);
+    for (const cb of subs) {
+      try {
+        cb(cur);
+      } catch (err) {
+        // 单订阅者异常不得中断其它订阅者（全部窗口依赖此唯一通道）
+        console.error("[state] 订阅回调异常", err);
+      }
+    }
   });
 }
 

@@ -28,8 +28,9 @@
   - **验证**：Rust 单元测试 13 用例（含第二轮新增 reorder/merge 去重/unstack 语义）+ CDP 冒烟 `win/tests/smoke-form.mjs`（真实鼠标手势）
   - 关键修复：vite 端口 1430→14300（Windows 排除端口段 1353–1452）；后台线程持锁调 Win32/tauri API 导致的整窗未响应死锁（lock 纪律：锁内零 Win32/零 tauri 调用，WinOp 锁外执行；lock-monitor 诊断线程）；capabilities 漏配 sidebar 导致边栏空白
   - **✅ 首轮 reviewer 报告 [win/REVIEW-M0-M4.md](win/REVIEW-M0-M4.md) 已全部修复**（🔴R1-R3 + 🟡Y1-Y10 + 🟢G1-G10，另发现并修复同型漏网：hook 锁内全屏 Win32 调用；见报告第三/四部分）
-  - 冒烟复跑：状态级断言稳定通过；手势断言在有人操作的本机受前台干扰，单测均已单独验证通过，**待无人机器干净复跑确认**（见报告 4.3 待办）
-  - 下一步：M5 多屏实机验证 + 体感验收；之后任务三（真实数据层 + journal + 同步引擎，接口已留好）
+  - **✅ 无人机器干净复跑已完成（2026-08-14 第三轮）**：冒烟连续 30 轮全绿（含两轮 reviewer 审查与修复）；发现并修复 4 个被掩盖的真实 bug（详见 win/REVIEW-M0-M4.md 第五部分）：B1 tauri 监听器 LIFO → 渲染滞后一拍（窗口改走 onState 订阅拿载荷）；B2 时间线崩塌移除被拖卡 → pointerup 丢失 → drag 永久卡死（兜底取消 + 拖出重建桌面卡继续手势，recent/时间线对称）；B3 锁内快照 payload + 锁外慢 Win32 后 emit → 陈旧快照回退 UI（payload 改为慢工作后重建，5 处）；B4 state 事件落在按下/释放之间吞 click（pressedId 保留按下的卡，视图内同型已修）
+  - 多屏实机验证待第二屏接入；体感验收（FORM-PLAN §13.4）留待用户人工体验
+  - 下一步：任务三（真实数据层 + journal + 同步引擎 + local API 60000；动作层接口 action.rs 已留好）
 
 ## 阿里云服务器（同步中枢）与端口
 

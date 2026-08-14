@@ -56,6 +56,10 @@ const s0 = await waitFor(async () => {
 await act("view", { name: "recent", open: false });
 await act("view", { name: "timeline", open: false });
 await act("debug.reset", {}, "smoke-prefly");
+// reset 重新播种 40 天旧卡 n14，自动收回 tick（≤30s）会归档它并广播 state → 全量重建。
+// 用 debug.autoArchive 确定性触发（效果同 tick：归档 + 未确认标记 + 广播），
+// 避免手势段被 tick 的广播随机打断（B4 产品层已修，这里再确定性化）
+await act("debug.autoArchive", {}, "smoke-prefly");
 const s1 = await waitFor(async () => {
   const ss = await st();
   return ss?.view === null && ss?.notes?.length >= 10 ? ss : null;
@@ -300,12 +304,27 @@ const checkPos = await canvas.eval(
 );
 ok(!!checkPos, "清单项定位");
 if (checkPos) {
-  await canvas.click(checkPos[0], checkPos[1]);
-  s = await waitFor(async () => {
-    const ss = await st();
-    return ss.notes.find((x) => x.id === "n2")?.items?.[0]?.done === true ? ss : null;
-  });
-  ok(s.notes.find((x) => x.id === "n2")?.items[0]?.done === true, "check 勾选生效");
+  // 点击偶发落空（本机环境抖动：state 事件落在按下/释放间隙）→ 安全重试：
+  // 仅在未勾选时重点、每次重读位置；已勾选则只等缓存追上（防双重切换）
+  let s2 = null;
+  for (let attempt = 0; attempt < 5 && !s2; attempt++) {
+    await sleep(150); // 等上一轮渲染/动画落定后再读位置
+    const cur = await canvas.eval(
+      `(() => { const el = document.querySelector('.note-card[data-id="n2"] .check-item input'); if (!el) return null; const r = el.getBoundingClientRect(); return { checked: el.checked, x: r.left + r.width / 2, y: r.top + r.height / 2 }; })()`,
+    );
+    if (!cur) break;
+    if (!cur.checked) await canvas.click(cur.x, cur.y);
+    try {
+      s2 = await waitFor(async () => {
+        const ss = await st();
+        return ss.notes.find((x) => x.id === "n2")?.items?.[0]?.done === true ? ss : null;
+      }, 4000);
+    } catch {
+      // 点击落空 → 下一轮重读位置重试
+    }
+  }
+  s = s2;
+  ok(s?.notes.find((x) => x.id === "n2")?.items[0]?.done === true, "check 勾选生效");
 }
 // take 默认落点（无 x/y → lastDeskPos 或边栏左侧空白）
 const tDefault = (
@@ -343,9 +362,11 @@ await act("view", { name: "timeline", open: true }, "smoke-view2");
 await sleep(400); // 等时间线渲染
 s = await st();
 ok(s.view?.name === "timeline", "timeline 视图打开");
-// G6：从 DOM 读第一张时间线卡实际位置（不再用魔法坐标）
+// G6：从 DOM 读第一张时间线文本卡实际位置（不再用魔法坐标）。
+// 必须避开清单卡（卡中心命中 .check-item 时 pointerdown 被忽略、拖拽不启动）与
+// 合并容器：T1c 勾选会 bump updated_at，被勾的清单卡会成为时间线首卡（确定性踩中）。
 const tlPos = await canvas.eval(
-  "(() => { const el = document.querySelector('.view-body .note-card'); if (!el) return null; const r = el.getBoundingClientRect(); return [r.left + r.width / 2, r.top + r.height / 2]; })()",
+  "(() => { const el = [...document.querySelectorAll('.view-body .note-card')].find(x => !x.classList.contains('merged') && !x.querySelector('.check-item') && x.querySelector('.text')); if (!el) return null; const r = el.getBoundingClientRect(); return [r.left + r.width / 2, r.top + r.height / 2]; })()",
 );
 ok(!!tlPos, "时间线第一张卡定位（DOM 读取）");
 if (tlPos) {

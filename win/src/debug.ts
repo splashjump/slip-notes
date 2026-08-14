@@ -3,7 +3,7 @@
 import { emit, listen } from "@tauri-apps/api/event";
 import { actions, newBatch } from "./api";
 import {
-  getState,
+  onState,
   initState,
   relTime,
   deletedNotes,
@@ -179,8 +179,9 @@ function bindButtons() {
 
 async function init() {
   await initState();
-  await listen("state", () => {
-    st = getState();
+  // 事件序纪律：唯一 listen("state") 在 state.ts；窗口一律 onState 订阅拿最新载荷
+  onState((s) => {
+    st = s;
     render();
   });
   await listen("edit-end", () => render());

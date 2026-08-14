@@ -935,13 +935,16 @@ pub fn setup(app: &AppHandle) {
             drop(g);
             mons.iter().map(|m| is_fullscreen_on(fg, m)).collect::<Vec<bool>>()
         };
-        let (outcome, payload) = {
+        let outcome = {
             let mut g = s.lock();
-            let outcome = g.on_foreground_change(app, false, fg, &fulls);
-            let payload = state_payload_inner(&g);
-            (outcome, payload)
+            g.on_foreground_change(app, false, fg, &fulls)
         };
         exec_hook_outcome(app, outcome);
+        // 慢工作（WinOp）之后重建 payload，避免陈旧快照（B3 同型）
+        let payload = {
+            let g = s.lock();
+            state_payload_inner(&g)
+        };
         let _ = app.emit("state", payload);
     }
 }
@@ -1143,7 +1146,6 @@ pub fn handle_drag_end(app: &AppHandle, p: DragEndPayload) {
         g.store.notes.push(n);
     }
     g.store.ephemeral.dragging = None;
-    let payload = state_payload_inner(&g);
     let was_shown = g.drag_layer_shown;
     if was_shown {
         g.drag_layer_shown = false;
@@ -1154,40 +1156,48 @@ pub fn handle_drag_end(app: &AppHandle, p: DragEndPayload) {
             hide_win(&dl);
         }
     }
+    // 慢工作（hide_win）之后重建 payload：避免陈旧快照回退期间到达的动作
+    let payload = {
+        let g = state.lock();
+        state_payload_inner(&g)
+    };
     let _ = app.emit("state", payload);
 }
 
-pub fn handle_drag_cancel(app: &AppHandle, p: LabelPayload) {
+pub fn handle_drag_cancel(app: &AppHandle, _p: LabelPayload) {
     let Some(state) = app.try_state::<Arc<AppLock>>() else {
         return;
     };
-    let (payload, was_shown) = {
+    let was_shown = {
         let mut g = state.lock();
         g.store.ephemeral.dragging = None;
-        let payload = state_payload_inner(&g);
         let was_shown = g.drag_layer_shown;
         g.drag_layer_shown = false;
-        (payload, was_shown)
+        was_shown
     };
     if was_shown {
         if let Some(dl) = app.get_webview_window("drag-layer") {
             hide_win(&dl);
         }
     }
+    // 慢工作（hide_win）之后重建 payload：避免陈旧快照回退期间到达的动作
+    let payload = {
+        let g = state.lock();
+        state_payload_inner(&g)
+    };
     let _ = app.emit("state", payload);
-    let _ = p;
 }
 
 pub fn handle_card_focus(app: &AppHandle, p: LabelPayload) {
     let Some(state) = app.try_state::<Arc<AppLock>>() else {
         return;
     };
-    let (prev, payload) = {
+    let prev = {
         let mut g = state.lock();
         let prev = g.editing.clone();
         g.editing = Some(p.label.clone());
         g.editing_since = Some(std::time::Instant::now());
-        (prev, state_payload_inner(&g))
+        prev
     };
     // 锁外：跨画布切换编辑先失活旧窗口，再激活新窗口（激活可能阻塞）
     if let Some(prev) = prev {
@@ -1200,6 +1210,11 @@ pub fn handle_card_focus(app: &AppHandle, p: LabelPayload) {
     if let Some(w) = app.get_webview_window(&p.label) {
         activate_editing(&w);
     }
+    // 慢工作之后重建 payload：避免陈旧快照回退期间到达的动作
+    let payload = {
+        let g = state.lock();
+        state_payload_inner(&g)
+    };
     let _ = app.emit("state", payload);
 }
 
@@ -1207,20 +1222,27 @@ pub fn handle_card_blur(app: &AppHandle, p: LabelPayload) {
     let Some(state) = app.try_state::<Arc<AppLock>>() else {
         return;
     };
-    let payload = {
+    let matched = {
         let mut g = state.lock();
         if g.editing.as_deref() == Some(p.label.as_str()) {
             g.editing = None;
             g.editing_since = None;
-            Some(state_payload_inner(&g))
+            true
         } else {
-            None
+            false
         }
     };
-    if payload.is_some() {
+    if matched {
         if let Some(w) = app.get_webview_window(&p.label) {
             deactivate_editing(&w);
         }
+        // 慢工作（deactivate_editing）之后重建 payload：
+        // 此前在锁内快照 payload 再慢工作后 emit，会把期间到达的动作（如 editText
+        // 提交）用旧快照回退 UI——冒烟编辑测试偶发超时的根因（B3）
+        let payload = {
+            let g = state.lock();
+            state_payload_inner(&g)
+        };
         let _ = app.emit("state", payload);
     }
 }

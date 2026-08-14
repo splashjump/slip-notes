@@ -90,6 +90,8 @@ export async function connect(titleMatch) {
             await this.mouse("mouseReleased", x2, y2, { buttons: 0 });
           },
           async click(x, y) {
+            // 按下与释放之间留足间隔：本机（远程/高负载）偶发 renderer 忙时丢事件，
+            // 30ms 窗口内若发生重渲染，down/up 落在不同元素上 → click 不触发
             await this.mouse("mousePressed", x, y, { buttons: 1 });
             await sleep(30);
             await this.mouse("mouseReleased", x, y, { buttons: 0 });

@@ -26,10 +26,12 @@ function finishAfter(el: HTMLElement, ms: number): void {
   }, ms);
 }
 
-/** 捕获当前所有 [data-flip] 元素的矩形（key = data-flip） */
+/** 捕获当前所有 [data-flip] 元素的矩形（key = data-flip）；
+ *  跳过 display:none 元素（其 rect 全零，会造成从原点飞入的假动画——拖出重建的隐藏卡） */
 export function capture(root: ParentNode): Map<string, DOMRect> {
   const map = new Map<string, DOMRect>();
   root.querySelectorAll<HTMLElement>("[data-flip]").forEach((el) => {
+    if (el.style.display === "none") return;
     const key = el.dataset.flip!;
     map.set(key, el.getBoundingClientRect());
   });
