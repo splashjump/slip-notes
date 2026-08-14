@@ -369,11 +369,13 @@ async function doAct(actName: string) {
       await actions.collapse();
       break;
     case "create": {
-      // 新建 = 桌面铺开空卡（发牌动效在画布窗口 FLIP）
+      // 新建 = 桌面铺开空卡（发牌动效在画布窗口 FLIP）+ 聚焦可打字（FORM-PLAN §3.4）
       const s = st;
       const batch = newBatch();
       const x = s ? Math.max(120, (s.sidebarRect?.[0] ?? 900) - 300) : 180;
-      await actions.create("", undefined, x, 140, batch);
+      const r = await actions.create("", undefined, x, 140, batch);
+      const id = r.notes?.[0]?.id;
+      if (id) void emit("focus-note", { id });
       break;
     }
     case "archiveAll":
@@ -397,6 +399,10 @@ async function doAct(actName: string) {
 }
 
 async function toggleView(name: string) {
+  // 视图互斥：另一个视图开着 → 先关再开（当前静默报"已有视图打开"，按钮看似失灵）
+  if (st?.view && st.view.name !== name) {
+    await actions.view(st.view.name, false);
+  }
   if (st?.view?.name === name) await actions.view(name, false);
   else await actions.view(name, true);
 }
@@ -712,6 +718,28 @@ async function init() {
   });
   await listen("drag-clear", () => {
     root.querySelector(".dock-hint")?.remove();
+  });
+  // 归档落点反馈（画布窗口拖入边栏后）：条目滚入视野 + 闪光高亮（"拖过去不见了"的对策）
+  await listen<{ ids: string[] }>("entry-highlight", (e) => {
+    const ids = e.payload?.ids ?? [];
+    if (!ids.length) return;
+    const highlight = (el: Element | null) => {
+      if (!el) return;
+      el.scrollIntoView({ block: "nearest" });
+      el.classList.remove("flash-entry");
+      void (el as HTMLElement).offsetWidth; // 重启动画
+      el.classList.add("flash-entry");
+      setTimeout(() => el.classList.remove("flash-entry"), 2400);
+    };
+    for (const id of ids) {
+      const entry = root.querySelector(`.sb-entry[data-id="${id}"]`);
+      if (entry) {
+        highlight(entry);
+        continue;
+      }
+      const member = root.querySelector(`.slot-member[data-id="${id}"]`);
+      if (member) highlight(member.closest(".slot"));
+    }
   });
   void emit("canvas-init", { label, dpr });
 }

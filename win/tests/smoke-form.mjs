@@ -184,25 +184,29 @@ const gNote = (
 s = await st();
 const mon = s.monitors[0];
 const dpr = mon.dpi / 96;
-const bandW = 662 * dpr;
+// 传送门几何与 styles.css/.geom.ts/Rust 常量对齐：带宽 690（含左右 padding 14×2）
+const bandW = 690 * dpr;
 const bandH = 96 * dpr;
 const bandX = (mon.rect[0] + mon.rect[2]) / 2 - bandW / 2;
 const bandTop = mon.rect[3] - 14 * dpr - bandH; // 与 CSS bottom:14px 对齐（Y4）
 const slotY = bandTop + bandH / 2;
-const targetCx = (bandX - mon.rect[0]) / dpr + (210 * dpr / dpr) * 0.25;
+const targetCx = (bandX - mon.rect[0]) / dpr + 14 + 210 * 0.5; // ⚡ 槽中心（含 padding 14）
 const slotCy = (slotY - mon.rect[1]) / dpr;
 
 // 等状态收敛 + DOM 渲染 + FLIP 动画结束（WebView2 节流下动画可能明显慢于标称时长）
 const waitNoteAt = (id, x, y) =>
-  waitFor(async () => {
-    const ss = await st();
-    const n = ss?.notes.find((n) => n.id === id);
-    if (!n || n.x !== x || n.y !== y) return null;
-    const settled = await canvas.eval(
-      `(() => { const el = document.querySelector('.note-card[data-id="${id}"]'); return el && el.getAnimations().length === 0 ? "yes" : null; })()`,
-    );
-    return settled === "yes" ? n : null;
-  });
+  waitFor(
+    async () => {
+      const ss = await st();
+      const n = ss?.notes.find((n) => n.id === id);
+      if (!n || n.x !== x || n.y !== y) return null;
+      const settled = await canvas.eval(
+        `(() => { const el = document.querySelector('.note-card[data-id="${id}"]'); return el && el.getAnimations().filter(a => a.playState === 'running').length === 0 ? "yes" : null; })()`,
+      );
+      return settled === "yes" ? n : null;
+    },
+    12000,
+  );
 await waitNoteAt(gNote, 100, 100);
 
 // 拖到 ⚡ 槽（便签左缘落在槽内 → 重叠 ≥ 50%）
@@ -243,6 +247,34 @@ ok(s.notes.find((x) => x.id === gNote)?.mode === "desk", "take 回桌面");
 // 清理手势专用卡
 await act("delete", { id: gNote }, "smoke-gesture-del");
 
+// T1d: 叠放落点——被拖卡置顶（第一轮"拖过去不见了"根因回归：被拖卡被垫底盖住）
+console.log("\n== T1d: 叠放置顶 =");
+const stA = (await act("create", { text: "叠放目标 A", x: 900, y: 420 }, "smoke-stacktop")).notes[0].id;
+const stB = (await act("create", { text: "被拖卡 B", x: 1150, y: 440 }, "smoke-stacktop")).notes[0].id;
+await waitNoteAt(stA, 900, 420);
+await waitNoteAt(stB, 1150, 440);
+{
+  const sA = (await st()).notes.find((x) => x.id === stA);
+  const sB = (await st()).notes.find((x) => x.id === stB);
+  const ax = (sA.x + sA.w / 2 - mon.rect[0]) / dpr;
+  const ay = (sA.y + sA.h / 2 - mon.rect[1]) / dpr;
+  const bx = (sB.x + sB.w / 2 - mon.rect[0]) / dpr;
+  const by = (sB.y + sB.h / 2 - mon.rect[1]) / dpr;
+  // 快速拖到目标中心 → 叠放。步数 6（总时长 ~200ms << 800ms 合并阈值，防慢机 flake）
+  await canvas.drag(bx, by, ax, ay, 6);
+  await sleep(600);
+}
+s = await st();
+const sa = s.notes.find((x) => x.id === stA);
+const sbN = s.notes.find((x) => x.id === stB);
+ok(sa.x === sbN.x && sa.y === sbN.y, "叠放：两卡同位置");
+const domOrder = await canvas.eval(
+  `[...document.querySelectorAll('.note-card')].filter(c => ['${stA}','${stB}'].includes(c.dataset.id)).map(c => c.dataset.id).join(',')`,
+);
+ok(domOrder === `${stA},${stB}`, `叠放 DOM 层序：被拖卡置顶（${domOrder}）`);
+await act("delete", { id: stA }, "smoke-stacktop");
+await act("delete", { id: stB }, "smoke-stacktop");
+
 // Y9 缺口：⏰ 松手 → chips 弹层 → 选值生效（端到端）
 console.log("\n== T1b: chips 弹层 =");
 const chipNote = (
@@ -250,7 +282,7 @@ const chipNote = (
 ).notes[0].id;
 await waitNoteAt(chipNote, 400, 200);
 s = await st();
-const timedCx = (bandX - mon.rect[0]) / dpr + 210 + 16 + 210 / 2; // ⏰ 槽中心（slot0 宽 210 + gap 16 + slot1 半宽 105）
+const timedCx = (bandX - mon.rect[0]) / dpr + 14 + 210 + 16 + 210 / 2; // ⏰ 槽中心（padding 14 + slot0 210 + gap 16 + slot1 半宽 105）
 const cg = s.notes.find((x) => x.id === chipNote);
 const cgx = (cg.x + cg.w / 2 - mon.rect[0]) / dpr;
 const cgy = (cg.y + cg.h / 2 - mon.rect[1]) / dpr;
@@ -297,6 +329,43 @@ if (editPos) {
     return ss.notes.find((x) => x.id === editNote)?.text.includes("已改") ? ss : null;
   });
   ok(s.notes.find((x) => x.id === editNote)?.text.includes("已改"), "editText 提交生效");
+}
+// 展开/收起回归（🔴修复：展开态拖动收缩曾被误放在 pointerdown，导致展开后收不回）
+{
+  const exNote = (await act("create", { text: ["展开收起卡", ...Array.from({ length: 9 }, (_, i) => `第${i + 1}行内容`), ].join("\n"), x: 420, y: 240 }, "smoke-expand")).notes[0].id;
+  try {
+    await waitNoteAt(exNote, 420, 240);
+  } catch {
+    const diag = await canvas.eval(
+      `(() => { const slip = window.__slip; const s = slip ? slip.state() : undefined; const n = s?.notes?.find(x => x.id === '${exNote}'); const el = document.querySelector('.note-card[data-id="${exNote}"]'); return { exId: '${exNote}', hasSlip: !!slip, stateNull: s === null || s === undefined, curSeq: s?.stateSeq, evLog: window.__slipEvLog, note: n ? { x: n.x, y: n.y, mode: n.mode, deleted: n.deleted } : null, notesLen: s?.notes?.length, el: !!el, journal: s?.journal?.slice(0, 4).map(j => j.batch + ':' + j.name).join(' | ') }; })()`,
+    );
+    console.error("  exNote 诊断:", JSON.stringify(diag));
+    throw new Error("exNote waitNoteAt 超时");
+  }
+  const clickText = async () => {
+    const p = await canvas.eval(
+      `(() => { const el = document.querySelector('.note-card[data-id="${exNote}"] .text'); if (!el) return null; const r = el.getBoundingClientRect(); return [r.left + r.width / 2, r.top + r.height / 2]; })()`,
+    );
+    if (!p) return false;
+    await canvas.click(p[0], p[1]);
+    await sleep(150);
+    return true;
+  };
+  await clickText(); // 展开 + 编辑
+  const expandedH = await canvas.eval(
+    `document.querySelector('.note-card[data-id="${exNote}"]')?.offsetHeight ?? 0`,
+  );
+  ok(expandedH > 180, `点击展开（卡高 ${expandedH}px）`);
+  await canvas.click(60, 60); // 空白 → endEdit（保留展开态）
+  await sleep(200);
+  await clickText(); // 再点 → 收起 + 编辑
+  await canvas.click(60, 60); // 空白 → endEdit（收起态）
+  await sleep(250);
+  const collapsed = await canvas.eval(
+    `(() => { const el = document.querySelector('.note-card[data-id="${exNote}"]'); return el ? { h: el.offsetHeight, clamped: !!el.querySelector('.text.clamp5') } : null; })()`,
+  );
+  ok(collapsed && collapsed.h <= 180 && collapsed.clamped, `点击收起（卡高 ${collapsed?.h}px, clamp5=${collapsed?.clamped}）`);
+  await act("delete", { id: exNote }, "smoke-expand");
 }
 // 勾选：n2 有清单项
 const checkPos = await canvas.eval(
@@ -375,6 +444,9 @@ if (tlPos) {
 }
 // 时间线拖出超阈值 → 视图崩塌关闭
 s = await st();
+if (s.view !== null) {
+  console.error("  诊断:", JSON.stringify(await canvas.eval("JSON.stringify({di: window.__slipDebug.dragInfo(), view: window.__slip.state()?.view, lastEnd: window.__slipDebug.lastEnd?.()})")));
+}
 ok(s.view === null, "时间线拖出超阈值 → 视图崩塌关闭");
 await act("view", { name: "timeline", open: false });
 s = await st();

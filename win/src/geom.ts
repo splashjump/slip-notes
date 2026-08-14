@@ -5,12 +5,13 @@ export const SIDEBAR_W = 270;
 export const QUICKBAR_W = 48;
 
 export const PORTAL = {
-  bandH: 96,
+  bandH: 96, // 20（上下 padding）+ 56（槽高），与 CSS .portal { padding: 20px 14px } 对齐
   slotW: 210,
   slotH: 56,
   gap: 16,
-  totalW: 210 * 3 + 16 * 2, // 662
-  bottomOffset: 14, // 与 CSS .portal { bottom: 14px } 对齐（Y4）
+  padX: 14,
+  totalW: 210 * 3 + 16 * 2 + 14 * 2, // 690（box-sizing: border-box，含左右 padding）
+  bottomOffset: 14, // 与 CSS .portal { bottom: 14px } 对齐
 };
 
 export const CARD = { w: 220, h: 170 };
@@ -56,7 +57,7 @@ export function portalSlotsPhys(m: MonitorInfo): Rect[] {
   const out: Rect[] = [];
   for (let i = 0; i < 3; i++) {
     out.push({
-      x: b.x + i * (PORTAL.slotW + PORTAL.gap) * s,
+      x: b.x + (PORTAL.padX + i * (PORTAL.slotW + PORTAL.gap)) * s,
       y,
       w: PORTAL.slotW * s,
       h: PORTAL.slotH * s,

@@ -391,6 +391,16 @@ impl Store {
         Ok(())
     }
 
+    /// 合并容器撕裂方向（row = 左右分 / col = 上下分；停靠点决定）
+    pub fn set_merge_dir(&mut self, id: &str, dir: &str) -> Result<(), String> {
+        let n = self.note_mut(id).ok_or("便签不存在")?;
+        let t = n.merge_tree.as_mut().ok_or("非合并容器")?;
+        if dir == "row" || dir == "col" {
+            t.dir = dir.to_string();
+        }
+        Ok(())
+    }
+
     /// 拆叠：散开同位置的其他成员（级联偏移）；id 自身不动——拖动松手时
     /// drag_end 已同步更新过 id 的位置，此处只负责给同伴腾位（Y10 明确语义）
     pub fn unstack(&mut self, id: &str) -> Result<(), String> {
@@ -773,6 +783,24 @@ mod tests {
         let c = r.unwrap();
         let r3 = s.merge(&[c.id.clone(), created[4].id.clone()], 10.0, 10.0);
         assert!(r3.is_err());
+    }
+
+    #[test]
+    fn set_merge_dir_switches_tear_direction() {
+        let mut s = Store::new();
+        let a = s.create("a", "#fff", 0.0, 0.0);
+        let b = s.create("b", "#fff", 0.0, 0.0);
+        let c = s.merge(&[a.id.clone(), b.id.clone()], 10.0, 10.0).unwrap();
+        assert_eq!(c.merge_tree.as_ref().unwrap().dir, "grid");
+        s.set_merge_dir(&c.id, "row").unwrap();
+        assert_eq!(s.note(&c.id).unwrap().merge_tree.as_ref().unwrap().dir, "row");
+        s.set_merge_dir(&c.id, "col").unwrap();
+        assert_eq!(s.note(&c.id).unwrap().merge_tree.as_ref().unwrap().dir, "col");
+        // 非法方向不变更
+        s.set_merge_dir(&c.id, "diag").unwrap();
+        assert_eq!(s.note(&c.id).unwrap().merge_tree.as_ref().unwrap().dir, "col");
+        // 非容器报错
+        assert!(s.set_merge_dir(&a.id, "row").is_err());
     }
 
     #[test]

@@ -17,6 +17,20 @@ export interface CardOpts {
   editable?: boolean; // 进入编辑态（contenteditable）
   viewMode?: boolean; // 视图内卡片（时间线/最近）
   noShadow?: boolean;
+  rot?: boolean; // 纸感旋转（桌面卡按 id 哈希稳定分配）
+  stackTop?: boolean; // 纸堆顶卡（×N 角标）
+  stackCount?: number;
+}
+
+/** 按 id 哈希稳定分配旋转姿态（纸感散放） */
+function rotOf(id: string): "a" | "b" | "c" | "" {
+  let h = 0;
+  for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) >>> 0;
+  const v = h % 5;
+  if (v === 0) return "a";
+  if (v === 1) return "b";
+  if (v === 2) return "c";
+  return "";
 }
 
 export function tagBadges(n: Note): string {
@@ -66,6 +80,10 @@ export function buildCard(n: Note, css: CardCss, opts: CardOpts = {}): HTMLEleme
   if (opts.viewMode) el.classList.add("view-card");
   if (opts.noShadow) el.classList.add("no-shadow");
   if (n.merge_tree) el.classList.add("merged");
+  if (opts.rot) {
+    const r = rotOf(n.id);
+    if (r) el.dataset.rot = r;
+  }
 
   el.innerHTML = `
     <div class="card-top">
@@ -74,11 +92,13 @@ export function buildCard(n: Note, css: CardCss, opts: CardOpts = {}): HTMLEleme
     </div>
     <div class="card-body">${n.merge_tree ? mergeGridHtml(n) : noteBodyHtml(n, !!opts.expanded)}</div>
     <div class="expand-hint">⤢</div>
+    ${opts.stackTop && (opts.stackCount ?? 1) > 1 ? `<div class="stack-badge">×${opts.stackCount}</div>` : ""}
   `;
   return el;
 }
 
 function mergeGridHtml(n: Note): string {
+  const dir = n.merge_tree?.dir ?? "grid";
   const cells = (n.merge_tree?.children ?? [])
     .map(
       (c) =>
@@ -87,7 +107,11 @@ function mergeGridHtml(n: Note): string {
          </div>`,
     )
     .join("");
-  return `<div class="merge-grid">${cells}</div>`;
+  return `
+    <div class="merge-bar"><span>🗂 合并容器</span><span class="merge-count">×${n.merge_tree?.children.length ?? 0}</span>
+      <button class="merge-split" data-unmerge="1" title="拆开（unmerge）">✂</button>
+    </div>
+    <div class="merge-grid" data-dir="${dir}">${cells}</div>`;
 }
 
 /** 边栏条目（标题 + 5 行截断；hover 抽屉露全文） */

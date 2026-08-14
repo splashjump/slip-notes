@@ -10,9 +10,10 @@ export interface RectLike {
 
 const DEFAULT_DURATION = 300;
 
-/** 强制收尾：动画被节流（WebView2 低优先渲染）时可能停在半途，
- *  残留 transform 会破坏命中测试——超时后强制 finish 到终态 */
-function finishAfter(el: HTMLElement, ms: number): void {
+/** 强制收尾：动画被节流（WebView2 低优先渲染，实测 ~1/4 速）时可能停在半途，
+ *  残留 transform 会破坏命中测试。超时预算按 4 倍时长给足视觉播放时间，
+ *  到点后强制 finish 到终态（节流下恰好与自然播放结束时点一致）。 */
+function finishAfter(el: HTMLElement, duration: number): void {
   setTimeout(() => {
     for (const a of el.getAnimations()) {
       if (a.playState === "running") {
@@ -23,7 +24,7 @@ function finishAfter(el: HTMLElement, ms: number): void {
         }
       }
     }
-  }, ms);
+  }, duration * 4 + 250);
 }
 
 /** 捕获当前所有 [data-flip] 元素的矩形（key = data-flip）；
@@ -38,6 +39,17 @@ export function capture(root: ParentNode): Map<string, DOMRect> {
   return map;
 }
 
+// ---------------------------------------------------------------------------
+// 跳过动画集合（一次性）：松手落定的卡、拖出重建的卡不播放出生动画——
+// 被拖卡在拖拽期间 display:none，capture 拿不到它的旧矩形，apply 会走
+// appearFrom 分支，造成"松手后卡从边栏点飞入"的假动画（用户感知 = 卡弹走又飞回）。
+// ---------------------------------------------------------------------------
+const skipOnce = new Set<string>();
+
+export function skipAnim(id: string): void {
+  skipOnce.add(id);
+}
+
 /** render 后调用：旧元素从旧位置 FLIP；新元素从 appearFrom 出生（缺省 = 缩放淡入） */
 export function apply(
   root: ParentNode,
@@ -47,6 +59,7 @@ export function apply(
   const duration = opts.duration ?? DEFAULT_DURATION;
   root.querySelectorAll<HTMLElement>("[data-flip]").forEach((el) => {
     const key = el.dataset.flip!;
+    if (skipOnce.delete(key)) return; // 一次性跳过（落定卡不飞入）
     const now = el.getBoundingClientRect();
     const from = prev.get(key);
     if (from) {
@@ -57,7 +70,7 @@ export function apply(
         [{ transform: `translate(${dx}px, ${dy}px)` }, { transform: "translate(0,0)" }],
         { duration, easing: "cubic-bezier(.2,.7,.3,1)" },
       );
-      finishAfter(el, duration + 120);
+      finishAfter(el, duration);
     } else if (opts.appearFrom) {
       const sx = opts.appearFrom.left + opts.appearFrom.width / 2 - (now.left + now.width / 2);
       const sy = opts.appearFrom.top + opts.appearFrom.height / 2 - (now.top + now.height / 2);
@@ -68,7 +81,7 @@ export function apply(
         ],
         { duration, easing: "cubic-bezier(.2,.7,.3,1)" },
       );
-      finishAfter(el, duration + 120);
+      finishAfter(el, duration);
     }
   });
 }
@@ -85,7 +98,7 @@ export function fly(el: HTMLElement, from: RectLike, duration = DEFAULT_DURATION
     ],
     { duration, easing: "cubic-bezier(.2,.7,.3,1)" },
   );
-  finishAfter(el, duration + 120); // G2：节流残留收尾
+  finishAfter(el, duration);
 }
 
 export function pulse(el: HTMLElement): void {
@@ -97,7 +110,7 @@ export function pulse(el: HTMLElement): void {
     ],
     { duration: 700, easing: "ease-in-out" },
   );
-  finishAfter(el, 700 + 120); // G2：残留 scale 会偏移命中测试
+  finishAfter(el, 700);
 }
 
 export function flash(el: HTMLElement, color = "rgba(255,255,255,.85)"): void {
@@ -108,5 +121,5 @@ export function flash(el: HTMLElement, color = "rgba(255,255,255,.85)"): void {
     ],
     { duration: 400, easing: "ease-out" },
   );
-  finishAfter(el, 400 + 120); // G2：残留 backgroundColor 收尾
+  finishAfter(el, 400);
 }

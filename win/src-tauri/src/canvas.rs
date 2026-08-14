@@ -80,6 +80,12 @@ pub struct AppState {
     pub drag_layer_ready: bool,
     pub drag_layer_shown: bool,
     pub drag_layer_dpr: Option<f64>,
+    /// 本轮拖拽源窗口（drag-layer-rendered ack 转发目标）
+    pub drag_src: Option<String>,
+    /// 视图关闭动画序列号（defer_lower 超时与 view-anim-done 竞态仲裁）
+    pub view_close_seq: u64,
+    /// state 事件序号（诊断用：前端日志对比可定位丢失的广播）
+    pub state_seq: std::cell::Cell<u64>,
     pub event_ids: Vec<tauri::EventId>,
 }
 
@@ -378,6 +384,61 @@ pub fn raise_for_view(app: &AppHandle, label: &str) {
     }
 }
 
+/// 视图关闭：延迟压回（前端先播放收回动画，view-anim-done 或超时后再执行）。
+/// 序列号仲裁：新一次关闭/打开会让旧定时器失效，防陈旧压回打断新视图。
+pub fn defer_lower(app: &AppHandle, label: &str) {
+    let Some(state) = app.try_state::<Arc<AppLock>>() else { return };
+    let seq = {
+        let mut g = state.lock();
+        g.view_close_seq += 1;
+        g.view_close_seq
+    };
+    let h = app.clone();
+    let label = label.to_string();
+    let _ = thread::Builder::new()
+        .name("view-lower".into())
+        .spawn(move || {
+            thread::sleep(Duration::from_millis(3000)); // 前端动画约 1.5s，3s 兜底
+            let Some(st) = h.try_state::<Arc<AppLock>>() else { return };
+            let (cur, has_view) = {
+                let g = st.lock();
+                (g.view_close_seq, g.view.is_some())
+            };
+            // 序列号未变（动画仍未完成）+ 当前无视图（新视图未打开）才压回
+            if cur == seq && !has_view {
+                lower_after_view(&h, &label);
+            }
+        });
+}
+
+/// 前端收回动画完成（view-anim-done）→ 立即压回 + 作废兑底定时器。
+/// 陈旧事件保护：若新视图已打开（快速关→开），不得压回新视图的抬升态。
+pub fn handle_view_anim_done(app: &AppHandle, p: LabelPayload) {
+    let Some(state) = app.try_state::<Arc<AppLock>>() else { return };
+    let has_view = {
+        let mut g = state.lock();
+        g.view_close_seq += 1;
+        g.view.is_some()
+    };
+    if !has_view {
+        lower_after_view(app, &p.label);
+    }
+}
+
+/// 拖拽层窗口渲染完成 ack → 转发给拖拽源窗口（源窗口收到后才隐藏原卡）
+pub fn handle_drag_layer_rendered(app: &AppHandle) {
+    let Some(state) = app.try_state::<Arc<AppLock>>() else { return };
+    let src = {
+        let g = state.lock();
+        g.drag_src.clone()
+    };
+    if let Some(src) = src {
+        if let Some(w) = app.get_webview_window(&src) {
+            let _ = w.emit("drag-layer-ack", ());
+        }
+    }
+}
+
 /// 视图关闭：压回置底（精确 Rgn 由前端动画结束后重报）
 pub fn lower_after_view(app: &AppHandle, label: &str) {
     let Some(w) = app.get_webview_window(label) else { return };
@@ -475,7 +536,10 @@ fn is_fullscreen_on(hwnd: HWND, m: &MonitorSlot) -> bool {
 // ---------------------------------------------------------------------------
 
 fn state_payload_inner(g: &AppState) -> serde_json::Value {
+    let seq = g.state_seq.get() + 1;
+    g.state_seq.set(seq);
     serde_json::json!({
+        "stateSeq": seq,
         "notes": g.store.notes,
         "ephemeral": g.store.ephemeral,
         "monitors": g.monitors.iter().map(|m| serde_json::json!({
@@ -529,6 +593,9 @@ impl AppState {
             drag_layer_ready: false,
             drag_layer_shown: false,
             drag_layer_dpr: None,
+            drag_src: None,
+            view_close_seq: 0,
+            state_seq: std::cell::Cell::new(0),
             event_ids: Vec::new(),
         };
         // 启动窗口创建（此时尚未上锁）
@@ -1086,6 +1153,7 @@ pub fn handle_drag_start(app: &AppHandle, p: DragStartPayload) {
     show_win_noactivate(&dl);
     let mut g = state.lock();
     g.drag_layer_shown = true;
+    g.drag_src = Some(p.label.clone());
     g.store.ephemeral.dragging = Some(p.id.clone());
     drop(g);
     if let Some(src) = app.get_webview_window(&p.label) {
@@ -1150,6 +1218,7 @@ pub fn handle_drag_end(app: &AppHandle, p: DragEndPayload) {
     if was_shown {
         g.drag_layer_shown = false;
     }
+    g.drag_src = None;
     drop(g);
     if was_shown {
         if let Some(dl) = app.get_webview_window("drag-layer") {
@@ -1173,6 +1242,7 @@ pub fn handle_drag_cancel(app: &AppHandle, _p: LabelPayload) {
         g.store.ephemeral.dragging = None;
         let was_shown = g.drag_layer_shown;
         g.drag_layer_shown = false;
+        g.drag_src = None;
         was_shown
     };
     if was_shown {

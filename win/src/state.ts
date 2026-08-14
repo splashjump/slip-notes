@@ -51,6 +51,7 @@ export interface JournalMeta {
 }
 
 export interface AppState {
+  stateSeq: number;
   notes: Note[];
   ephemeral: Ephemeral;
   monitors: MonitorInfo[];
@@ -67,6 +68,12 @@ export interface AppState {
 
 let cur: AppState | null = null;
 const subs = new Set<(s: AppState) => void>();
+
+/** 最近收到的 state 事件日志（诊断：seq 跳号 = 广播丢失） */
+export const evLog: { seq: number; notes: number; t: number }[] = [];
+if (typeof window !== "undefined") {
+  (window as unknown as Record<string, unknown>).__slipEvLog = evLog;
+}
 
 /**
  * 事件序纪律：initState() 是本模块唯一的 listen("state") 注册点，
@@ -91,6 +98,15 @@ export function onState(cb: (s: AppState) => void): void {
 
 export async function initState(): Promise<void> {
   await listen<AppState>("state", (e) => {
+    evLog.push({ seq: e.payload.stateSeq ?? -1, notes: e.payload.notes?.length ?? 0, t: Date.now() });
+    if (evLog.length > 20) evLog.shift();
+    // 乱序保护（B3 传输层根治）：事件跨线程 emit 可能乱序到达，陈旧载荷
+    // 会回退 UI（缓存被旧快照覆盖，新建卡从列表里"消失"）。序号单调递增，
+    // 非递增 = 陈旧，直接丢弃。
+    if (cur && (e.payload.stateSeq ?? 0) <= cur.stateSeq) {
+      console.warn("[state] 丢弃乱序载荷", e.payload.stateSeq, "<=", cur.stateSeq);
+      return;
+    }
     cur = e.payload;
     for (const cb of subs) {
       try {

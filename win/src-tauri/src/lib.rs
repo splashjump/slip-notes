@@ -29,6 +29,15 @@ fn bind_events(app: &tauri::AppHandle) {
     bind!("drag-cancel", canvas::LabelPayload, canvas::handle_drag_cancel);
     bind!("card-focus", canvas::LabelPayload, canvas::handle_card_focus);
     bind!("card-blur", canvas::LabelPayload, canvas::handle_card_blur);
+    bind!("view-anim-done", canvas::LabelPayload, canvas::handle_view_anim_done);
+    // 拖拽层渲染完成 ack（payload {} → EmptyPayload），转发给拖拽源窗口
+    {
+        let h = app.clone();
+        let id = app.listen("drag-layer-rendered", move |_| {
+            canvas::handle_drag_layer_rendered(&h);
+        });
+        canvas::push_event_id(app, id);
+    }
     let h = app.clone();
     let id = app.listen("rebuild-canvases", move |_| {
         canvas::handle_rebuild(&h);

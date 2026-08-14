@@ -247,3 +247,51 @@ ephemeral（Rust 侧，不持久化，影响数据行为的 UI 态）：
 - [ ] 档案格容量算法手感（320px/平铺 vs 堆叠/±1 迟滞）
 - [ ] 全屏时边栏一并隐藏是否可接受
 - [ ] 合并上限 4 体感；方向语义（AI 移动）落点合理性
+
+## 14. 第二轮实施记录（2026-08-15：美化补全 + 拖动链路加固）
+
+> 用户实测反馈三大问题：拖动卡消失/弹到左上角又飞回、视图按钮看不到动画、传送门与设计不符。
+> 流程：reviewer 根因诊断（结论：不重写，拖动链路集中加固）→ 实施 → reviewer 复审（1🔴+2🟡+7🟢 已全修）→ 冒烟 5 连绿。
+
+### 14.1 拖动恶性 bug 根因与修复（reviewer 诊断确认）
+
+| 症状 | 根因 | 修复 |
+|---|---|---|
+| 拖过去不见了 | 叠放 ids 顺序导致被拖卡垫底被盖住；拖拽层渲染无 ack，原卡提前隐藏 | 被拖卡排最后（置顶）；drag-layer 渲染完成 ack（`drag-layer-rendered`→Rust 转发→源窗口再隐藏原卡，450ms 兜底）；归档后边栏条目滚入视野+闪光 + 扫入边栏幽灵动画 |
+| 弹到左上角又飞回 | ①视图拖出 grab 用 offsetLeft（view-body 相对坐标，错位 ≈面板 inset）→ 重建卡落左上角；②松手后 capture 拿不到隐藏卡旧矩形 → apply 走 appearFrom 分支从边栏点飞入 | ①视图卡 grab 改 getBoundingClientRect，桌面卡保持 offsetLeft（layout 坐标）；②`skipAnim` 一次性集合：落定卡不播出生动画；③appearFromPoint 物理→CSS 换算修复（副屏返回 undefined）；④drag-move 去 rAF 改时间限频（16ms） |
+| 视图按钮看不到动画 | ①WebView2 节流 WAAPI ~1/4 速，finishAfter 420ms 强制收尾＝只看到 1/3；②关闭视图先压回窗口再播动画（被遮挡）；③遮罩无过渡 | ①finishAfter 预算 4×duration+250；②关闭 = 前端先播收回动画（遮罩淡出+FLIP 飞回+幽灵）→ emit `view-anim-done` → Rust `defer_lower` 压回（3s 兜底+序列号仲裁+新视图保护）；③遮罩淡入淡出+面板入场 |
+
+### 14.2 传送门补全（FORM-PLAN §3.5 逐条）
+
+- 光带视觉：conic 彩虹光环旋转 + 顶部光带线 + 呼吸辉光（armed 增亮提速）；槽位主题色 + 底部内辉光 + 图标辉光
+- **拖起便签增亮**（此前完全未实现）：drag-start/drag-feedback → `.portal.armed`
+- **标记动效**（此前完全未实现）：⚡颜料桶流下染红（pour）/ ⏰笔刷自上而下刷出（brush）/ 📄擦除倒刷（erase）
+- 几何对齐：box-sizing:border-box 全局化 + 带总宽 662→690（padX 14）+ 槽位 padding 19px 使带高精确 96（判定区与视觉槽位零偏差）
+
+### 14.3 其它设计补全（对照 §3 差异项）
+
+- 展开态拖动瞬间收缩再拖（drag-collapse 类，4px 阈值后触发——放 pointerdown 会弄坏展开/收起 toggle，reviewer 🔴）
+- 新建卡聚焦可打字（focus-note 事件，元素已渲染则立即编辑）
+- 磁吸引导线 + 首次吸附弹簧动效（§3.4"引导线+吸附弹性"）
+- 叠放上限 9 超限轻晃拒绝；纸堆厚度视觉（成员逐层错开 2px/张）+ 顶卡 ×N 角标
+- 合并容器：撕裂方向 dir（row/col，停靠点决定）+ 撕纸线分隔 + 容器标头 + ✂ 拆分按钮
+- 时间线 = 全部实体（含归档，§3.6）；最近 = 桌面 Top 12；视图卡点击=脉冲不编辑
+- 视图拖出：归档卡落桌走 take；尺寸用 store 原尺寸（时间线卡 560×120 不再污染桌面卡）
+- 边栏 toggleView 互斥先关后开；一键归档/归档落点 → 扫入边栏幽灵 + 条目闪光
+
+### 14.4 视觉重构（纸感）
+
+- KaiTi 手写体（卡片正文/标题）、撕纸圆角、纸胶带、按 id 哈希稳定旋转、三层阴影
+- 传送门/视图/边栏/chips 全套重做（styles.css 879→~1300 行；全局 box-sizing reset）
+
+### 14.6 乱序事件根治（B3 传输层，复跑发现）
+
+- 现象：冒烟间歇性失败（~25%），诊断为"create 响应返回新卡 id，但 state 缓存/journal 里没有"——state 事件乱序到达：seq 51（含新卡）先到、seq 50（陈旧载荷）后到，最后到达的旧载荷把缓存回退（B3"陈旧快照回退 UI"在事件传输层的同源变体，此前只在锁内快照层修过 5 处）。
+- 修复：state payload 增加 Rust 侧全局单调 `stateSeq`；前端 state.ts 丢弃非递增载荷（`payload.stateSeq <= cur.stateSeq → drop`）。与铁律 1（版本号单调递增）同源：状态更新必须单调。
+- 验证：修复后冒烟连续 32 轮全绿（修复前 ~25% 失败率）。诊断设施保留：`__slipEvLog`（最近 20 条事件序号）+ `stateSeq` 字段。
+
+### 14.5 复审与验证
+
+- reviewer 复审：1🔴（展开/收起 toggle 回归，已修+冒烟覆盖）+2🟡（unmerge 幽灵残留 pressedId 前置；stackOff 补偿语义错误——叠放路径位置由 stack 动作覆盖，减法纯负资产，已删除）已修；🟢：closingView 被无关 state 事件截断（保持到 timer 收尾）、陈旧 view-anim-done/defer_lower 压回新视图（Rust 检查 view.is_none）、focus-note 竞态、450ms 兜底跨轮误伤（捕获拖拽 id）、T1d 慢机合并阈值 flake（6 步）、portal 带高 96vs98（padding 19px）、set_merge_dir 单测、冒烟补展开/收起断言——全部修复
+- 验证：Rust 单测 14/14 · tsc 零错误 · cargo check 零警告 · CDP 冒烟（新增叠放置顶/展开收起断言）连续 5 轮全绿
+- 视觉验证：CDP 截图 + vision 模型评审（纸堆厚度/×3 角标/胶带/传送门光环/时间线遮罩均确认）

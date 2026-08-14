@@ -33,6 +33,8 @@ async function init() {
       { noShadow: false },
     );
     root.appendChild(el);
+    // 渲染完成 ack：源窗口收到后才隐藏原卡（消除拖起时"两张卡都不在"的窗口）
+    void emit("drag-layer-rendered", {});
   });
   void emit("drag-layer-ready", { dpr: window.devicePixelRatio || 1 });
 }

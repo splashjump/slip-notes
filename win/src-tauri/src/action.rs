@@ -56,7 +56,9 @@ pub const PORTAL_BAND_H_CSS: f64 = 96.0;
 pub const PORTAL_SLOT_W_CSS: f64 = 210.0;
 pub const PORTAL_SLOT_H_CSS: f64 = 56.0;
 pub const PORTAL_GAP_CSS: f64 = 16.0;
-pub const PORTAL_TOTAL_W_CSS: f64 = PORTAL_SLOT_W_CSS * 3.0 + PORTAL_GAP_CSS * 2.0; // 662
+pub const PORTAL_PAD_X_CSS: f64 = 14.0;
+/// 光带总宽（含左右 padding 14×2；CSS .portal box-sizing:border-box，与 geom.ts 对齐）
+pub const PORTAL_TOTAL_W_CSS: f64 = PORTAL_SLOT_W_CSS * 3.0 + PORTAL_GAP_CSS * 2.0 + PORTAL_PAD_X_CSS * 2.0; // 690
 /// 传送门光带距屏底偏移（与 CSS .portal { bottom: 14px } 对齐；Y4）
 pub const PORTAL_BOTTOM_OFFSET_CSS: f64 = 14.0;
 
@@ -80,7 +82,7 @@ pub fn portal_slots(m: &MonitorSlot) -> [(f64, f64, f64, f64); 3] {
     let y = by + (bh - PORTAL_SLOT_H_CSS * s) / 2.0;
     let mut out = [(0.0, 0.0, 0.0, 0.0); 3];
     for i in 0..3 {
-        let x = bx + i as f64 * (PORTAL_SLOT_W_CSS + PORTAL_GAP_CSS) * s;
+        let x = bx + (PORTAL_PAD_X_CSS + i as f64 * (PORTAL_SLOT_W_CSS + PORTAL_GAP_CSS)) * s;
         out[i] = (x, y, PORTAL_SLOT_W_CSS * s, PORTAL_SLOT_H_CSS * s);
     }
     out
@@ -338,6 +340,10 @@ pub fn dispatch(app: &AppHandle, req: ActionRequest) -> ActionResponse {
             let x = a.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0);
             let y = a.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0);
             let n = s.merge(&ids, x, y)?;
+            // 撕裂方向：row = 左右分 / col = 上下分（停靠点决定；默认 grid）
+            if let Some(dir) = a.get("dir").and_then(|v| v.as_str()) {
+                s.set_merge_dir(&n.id, dir)?;
+            }
             Ok(vec![n.id])
         }),
         "unmerge" => data(app, &state, author, batch, name, args, |s, a| {
@@ -546,12 +552,14 @@ fn view_action(
             v.map(|v| v.label)
         }
     };
-    // 锁外：窗口抬升/压回
+    // 锁外：窗口抬升/压回。关闭 = 前端先播放收回动画（遮罩淡出 + FLIP 飞回），
+    // 动画完成发 view-anim-done 再压回窗口（此前先压回再播放，动画被遮挡基本不可见）；
+    // defer_lower 带 3s 超时兜底，前端异常也不残留抬升态。
     if let Some(label) = label {
         if open {
             canvas::raise_for_view(app, &label);
         } else {
-            canvas::lower_after_view(app, &label);
+            canvas::defer_lower(app, &label);
         }
     }
     Ok(Vec::new())
