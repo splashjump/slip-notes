@@ -1,13 +1,14 @@
-//! 画布窗口管理器（spike 版）
+//! 窗口管理器（形态先行版，FORM-PLAN §4）
 //!
-//! 五项验证对应的实现位置：
-//! 1. 透明        -> create_canvas（WebviewWindowBuilder transparent/decorations/shadow）
-//! 2. 置底        -> push_all_bottom + WS_EX_NOACTIVATE（watchdog 定时回压）
-//! 3. 区域穿透    -> apply_region（SetWindowRgn，区域 = 便签矩形并集）
-//! 4. 多显示器    -> enumerate_monitors + rebuild_if_needed（每显示器一个画布窗口）
-//! 5. 全屏检测    -> SetWinEventHook(EVENT_SYSTEM_FOREGROUND) + is_fullscreen_on
+//! 窗口结构：主屏 = 边栏窗口(sidebar) + 画布窗口(canvas-i)；副屏 = 画布窗口；
+//! 全局 = 拖拽层窗口(drag-layer)；控制台 = main（普通窗口）。
+//! 窗口常态 = 全屏透明（画布）/ 边栏矩形（sidebar），Rgn 控制穿透。
+//! 视图打开：画布窗口抬升到顶（SWP_NOACTIVATE）+ Rgn 全屏 + 窗口内遮罩（前端）。
 //!
-//! 注：windows crate 0.61 里 tauri 的 hwnd() 返回同一个 crate 的 HWND 类型，直接使用。
+//! ⚠️ 锁纪律（重要）：AppState 锁内只做数据操作；任何 Win32 窗口调用
+//! （SetWindowPos / ShowWindow / SetWindowRgn）必须离开锁执行——
+//! 否则后台线程持锁 + SendMessage 到主线程 + 主线程等锁 = 互相等待（整窗未响应）。
+//! 实现方式：锁内计算 → 返回 WinOp 列表 → 释放锁 → exec_win_ops。
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -29,65 +30,112 @@ use windows::Win32::UI::WindowsAndMessaging::{
     EVENT_OBJECT_LOCATIONCHANGE, EVENT_SYSTEM_FOREGROUND, GWL_EXSTYLE, GWL_STYLE,
     HWND_BOTTOM, HWND_TOP, MSG, SET_WINDOW_POS_FLAGS, SW_HIDE, SW_SHOWNOACTIVATE,
     SWP_NOACTIVATE, SWP_NOZORDER, SWP_NOMOVE, SWP_NOSIZE, WINEVENT_OUTOFCONTEXT,
-    WS_CAPTION, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    MONITORINFOF_PRIMARY, WS_CAPTION, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
 };
+
+use crate::action;
+use crate::lock::{register_thread_name, AppLock};
+use crate::store::Store;
 
 // ---------------------------------------------------------------------------
 // 数据结构
 // ---------------------------------------------------------------------------
 
-/// 便签（spike 假数据，坐标 = 物理像素 / 虚拟屏坐标系）
-#[derive(Clone, Serialize, Debug)]
-pub struct Note {
-    pub id: String,
-    pub x: f64,
-    pub y: f64,
-    pub w: f64,
-    pub h: f64,
-    pub color: String,
-    pub kind: String, // "text" | "checklist"
-    pub text: String,
-    #[serde(default)]
-    pub items: Vec<CheckItem>,
-}
-
-#[derive(Clone, Serialize, Debug)]
-pub struct CheckItem {
-    pub text: String,
-    pub done: bool,
-}
-
-/// 显示器信息（物理像素，虚拟屏坐标）
 #[derive(Clone, Debug)]
-pub(crate) struct MonitorSlot {
-    rect: RECT,
-    dpi: u32,
+pub struct MonitorSlot {
+    pub rect: RECT,
+    pub dpi: u32,
+    pub primary: bool,
 }
 
-/// 管理器内部状态（Arc<Mutex<Inner>> 挂在 app state 上）
-pub struct Inner {
+impl MonitorSlot {
+    pub fn scale(&self) -> f64 {
+        self.dpi as f64 / 96.0
+    }
+}
+
+#[derive(Clone, Serialize, Debug)]
+pub struct ViewInfo {
+    pub name: String,  // "recent" | "timeline"
+    pub label: String, // 被抬升的画布窗口
+}
+
+/// 管理器内部状态（Arc<AppLock> 挂在 app state 上）
+pub struct AppState {
     pub monitors: Vec<MonitorSlot>,
     pub virtual_rect: RECT,
-    pub notes: Vec<Note>,
-    pub editing: Option<String>,          // 正在编辑的画布窗口 label
-    pub editing_since: Option<std::time::Instant>, // 编辑开始时间（失焦判定宽容期用）
-    pub fullscreen_hidden: Vec<String>,   // 因全屏而隐藏的画布 label
-    /// 每画布窗口当前 DPR（由前端 canvas-init 上报）
+    pub primary: usize, // 边栏所在显示器
+    pub store: Store,
+    pub view: Option<ViewInfo>,
+    pub sidebar_collapsed: bool,
+    pub sidebar_rect: Option<(f64, f64, f64, f64)>, // 物理像素
+    pub console_visible: bool,
+    pub editing: Option<String>,
+    pub editing_since: Option<std::time::Instant>,
+    /// 按显示器跟踪的全屏隐藏状态（Y7）：true = 该屏全屏时窗口已隐藏
+    pub fullscreen_hidden: Vec<bool>,
     pub canvas_dpr: HashMap<String, f64>,
-    /// 拖拽层窗口状态：页面是否就绪 / 当前是否显示中 / 其 DPR（drag-layer-ready 上报）
+    /// 窗口 hwnd 缓存（usize；创建时记录；hook 线程锁内只读，避免锁内调 tauri API）
+    pub hwnds: HashMap<String, usize>,
     pub drag_layer_ready: bool,
     pub drag_layer_shown: bool,
     pub drag_layer_dpr: Option<f64>,
-    /// app.listen 的 EventId：必须持有否则监听器立即注销（Tauri v2 语义）
     pub event_ids: Vec<tauri::EventId>,
+}
+
+/// Win32 窗口操作（锁外执行；锁内只负责生成）
+#[derive(Debug)]
+pub(crate) enum WinOp {
+    PushBottom(String),
+    Hide(String),
+    Show(String),
+    RaiseTop(String),
+    Region(String, f64, Vec<(f64, f64, f64, f64)>), // label, dpr, rects
+}
+
+fn exec_win_ops(app: &AppHandle, ops: Vec<WinOp>) {
+    for op in ops {
+        match op {
+            WinOp::PushBottom(l) => {
+                if let Some(w) = app.get_webview_window(&l) {
+                    push_bottom(&w);
+                }
+            }
+            WinOp::Hide(l) => {
+                if let Some(w) = app.get_webview_window(&l) {
+                    hide_win(&w);
+                }
+            }
+            WinOp::Show(l) => {
+                if let Some(w) = app.get_webview_window(&l) {
+                    show_win_noactivate(&w);
+                }
+            }
+            WinOp::RaiseTop(l) => {
+                if let Some(w) = app.get_webview_window(&l) {
+                    if let Ok(hwnd) = w.hwnd() {
+                        set_pos(hwnd, Some(HWND_TOP), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+                    }
+                }
+            }
+            WinOp::Region(l, dpr, rects) => {
+                if let Some(w) = app.get_webview_window(&l) {
+                    apply_region(&w, &rects, dpr);
+                }
+            }
+        }
+    }
 }
 
 /// WinEvent 回调里用的 AppHandle
 static HOOK_APP: OnceLock<Mutex<Option<AppHandle>>> = OnceLock::new();
 
-const WATCHDOG_INTERVAL: Duration = Duration::from_millis(800);
+#[allow(dead_code)]
+const WATCHDOG_INTERVAL: Duration = Duration::from_millis(800); // 预留（原 watchdog 已移除）
+const AUTO_ARCHIVE_INTERVAL: Duration = Duration::from_secs(30);
 const HOOK_EVENT_FG: u32 = EVENT_SYSTEM_FOREGROUND;
 const HOOK_EVENT_LOC: u32 = EVENT_OBJECT_LOCATIONCHANGE;
+const HOOK_EVENT_DISPLAYCHANGE: u32 = 0x8010; // EVENT_DISPLAYCHANGE
 
 // ---------------------------------------------------------------------------
 // 窗口创建 / 销毁
@@ -97,7 +145,6 @@ pub fn canvas_label(i: usize) -> String {
     format!("canvas-{i}")
 }
 
-/// 窗口当前所在显示器的缩放比（跨 DPI 屏拖动时实时变化，不能长期缓存）
 fn window_scale(hwnd: HWND) -> f64 {
     unsafe {
         let dpi = GetDpiForWindow(hwnd);
@@ -112,9 +159,6 @@ fn window_scale(hwnd: HWND) -> f64 {
 fn create_canvas_window(app: &AppHandle, label: &str, rect: &RECT) -> tauri::Result<()> {
     let w = (rect.right - rect.left) as f64;
     let h = (rect.bottom - rect.top) as f64;
-    // 注意：WebviewWindowBuilder 的 position/inner_size 的 f64 版本按 **logical** 像素解释，
-    // 而 rect 是物理像素。100% DPI 下两者相等（spike 实测机），非 100% 缩放下会错位/超屏。
-    // 因此 build 后必须用物理 API 强制修正（窗口透明 + 初始空 Rgn，修正前不可见）。
     let win = WebviewWindowBuilder::new(app, label, WebviewUrl::App("index.html".into()))
         .title("slip-canvas")
         .position(rect.left as f64, rect.top as f64)
@@ -127,31 +171,56 @@ fn create_canvas_window(app: &AppHandle, label: &str, rect: &RECT) -> tauri::Res
         .visible_on_all_workspaces(true)
         .resizable(false)
         .focused(false)
-        .on_page_load(|w, payload| {
-            log::info!("[spike] 页面加载 label={} url={}", w.label(), payload.url());
-        })
         .build()?;
     let _ = win.set_position(tauri::PhysicalPosition::new(rect.left, rect.top));
     let _ = win.set_size(tauri::PhysicalSize::new(w as u32, h as u32));
     apply_desk_style(&win);
-    // 立即设空区域：页面加载完成前窗口不拦截任何鼠标事件
     apply_region(&win, &[], 1.0);
+    record_hwnd(app, label, &win);
     Ok(())
 }
 
-/// WS_EX_TOOLWINDOW —— 无任务栏图标。
-/// 注意：不加 WS_EX_NOACTIVATE！WebView2 在 NOACTIVATE 窗口上不处理鼠标输入，
-/// 卡片点击/拖动全靠鼠标事件，因此允许点击卡片时正常激活（= 编辑模式），
-/// 失焦后由 WinEvent 检测并回压底部。
+fn record_hwnd(app: &AppHandle, label: &str, win: &tauri::WebviewWindow) {
+    if let Some(state) = app.try_state::<Arc<AppLock>>() {
+        if let Ok(h) = win.hwnd() {
+            let mut g = state.lock();
+            g.hwnds.insert(label.to_string(), h.0 as usize);
+        }
+    }
+}
+
+fn create_sidebar_window(app: &AppHandle, m: &MonitorSlot) -> tauri::Result<()> {
+    let s = m.scale();
+    let w = action::SIDEBAR_W_CSS * s;
+    let h = (m.rect.bottom - m.rect.top) as f64;
+    let x = m.rect.right as f64 - w;
+    let y = m.rect.top as f64;
+    let win = WebviewWindowBuilder::new(app, "sidebar", WebviewUrl::App("index.html".into()))
+        .title("slip-sidebar")
+        .position(x, y)
+        .inner_size(w, h)
+        .decorations(false)
+        .transparent(true)
+        .shadow(false)
+        .always_on_bottom(true)
+        .skip_taskbar(true)
+        .visible_on_all_workspaces(true)
+        .resizable(false)
+        .focused(false)
+        .build()?;
+    let _ = win.set_position(tauri::PhysicalPosition::new(x as i32, y as i32));
+    let _ = win.set_size(tauri::PhysicalSize::new(w as u32, h as u32));
+    apply_desk_style(&win);
+    apply_region(&win, &[], 1.0);
+    record_hwnd(app, "sidebar", &win);
+    Ok(())
+}
+
 fn apply_desk_style(win: &tauri::WebviewWindow) {
     if let Ok(hwnd) = win.hwnd() {
         unsafe {
             let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-            SetWindowLongPtrW(
-                hwnd,
-                GWL_EXSTYLE,
-                ex | WS_EX_TOOLWINDOW.0 as isize,
-            );
+            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex | WS_EX_TOOLWINDOW.0 as isize);
         }
     }
 }
@@ -185,6 +254,7 @@ unsafe extern "system" fn monitor_enum_proc(
         out.push(MonitorSlot {
             rect: info.monitorInfo.rcMonitor,
             dpi: dpi_x,
+            primary: info.monitorInfo.dwFlags & MONITORINFOF_PRIMARY != 0,
         });
     }
     windows_core::BOOL(1)
@@ -224,13 +294,10 @@ fn virtual_bounds(monitors: &[MonitorSlot]) -> RECT {
 }
 
 // ---------------------------------------------------------------------------
-// 区域穿透：SetWindowRgn
+// 区域穿透：SetWindowRgn（⚠️ 必须在锁外调用）
 // ---------------------------------------------------------------------------
 
-/// rects: CSS 像素（前端 getBoundingClientRect）；dpr: 该窗口缩放比
-/// 区域 = 便签矩形并集；无便签处鼠标天然穿透到桌面。
-/// rects 为空 → 设一个空区域（窗口完全不拦截鼠标，用于窗口刚建/便签清空的过渡态）
-pub fn apply_region(win: &tauri::WebviewWindow, rects: &[(f64, f64, f64, f64)], dpr: f64) {
+fn apply_region(win: &tauri::WebviewWindow, rects: &[(f64, f64, f64, f64)], dpr: f64) {
     let hwnd = match win.hwnd() {
         Ok(h) => h,
         Err(_) => return,
@@ -257,26 +324,12 @@ pub fn apply_region(win: &tauri::WebviewWindow, rects: &[(f64, f64, f64, f64)], 
                 let _ = DeleteObject(HGDIOBJ(one.0));
             }
         }
-        // SetWindowRgn 成功后系统接管 hrgn，不要再 DeleteObject
         let _ = SetWindowRgn(hwnd, Some(combined), true);
     }
 }
 
-/// 清除区域：恢复整个窗口矩形（已废弃：拖动期间区域改为跟随便签实时位置，
-/// 不再全开——全开区域 + tao 的 InvalidateRgn 整窗重绘 = DWM 透明间隙全屏闪现）
-#[allow(dead_code)]
-pub fn clear_region(win: &tauri::WebviewWindow) {
-    let hwnd = match win.hwnd() {
-        Ok(h) => h,
-        Err(_) => return,
-    };
-    unsafe {
-        let _ = SetWindowRgn(hwnd, None, true);
-    }
-}
-
 // ---------------------------------------------------------------------------
-// 置底回压 / 拖拽期间窗口放大
+// z-order 管理（⚠️ 必须在锁外调用）
 // ---------------------------------------------------------------------------
 
 fn set_pos(hwnd: HWND, insert_after: Option<HWND>, x: i32, y: i32, cx: i32, cy: i32, flags: SET_WINDOW_POS_FLAGS) {
@@ -299,24 +352,39 @@ pub fn push_bottom(win: &tauri::WebviewWindow) {
     }
 }
 
-/// 编辑激活：取消 tao 的 always_on_bottom（否则 z-order 会被 tao 强制压回），
-/// 移除 NOACTIVATE，取得焦点。
 pub fn activate_editing(win: &tauri::WebviewWindow) {
     remove_noactivate(win);
     let _ = win.set_always_on_bottom(false);
     let _ = win.set_focus();
 }
 
-/// 编辑结束：恢复 always_on_bottom + 回压底部
 pub fn deactivate_editing(win: &tauri::WebviewWindow) {
     let _ = win.set_always_on_bottom(true);
     apply_desk_style(win);
     push_bottom(win);
 }
 
-/// 拖拽层窗口：拖动期间显示被拖便签的副本（顶层小窗）。
-/// 画布窗口拖动期间完全不动 → 其他便签保持在桌面层，只有被拖便签浮在最顶。
-const DRAG_LAYER_MARGIN: f64 = 30.0; // 卡片阴影边距（CSS px），与 drag-layer.ts 一致
+/// 视图打开：画布窗口抬升到顶（不抢前台）+ Rgn 全屏
+pub fn raise_for_view(app: &AppHandle, label: &str) {
+    let Some(w) = app.get_webview_window(label) else { return };
+    let _ = w.set_always_on_bottom(false);
+    remove_noactivate(&w);
+    exec_win_ops(app, vec![WinOp::RaiseTop(label.to_string())]);
+    // Rgn = 全屏（SetWindowRgn(None) 恢复整窗）
+    if let Ok(hwnd) = w.hwnd() {
+        unsafe {
+            let _ = SetWindowRgn(hwnd, None, true);
+        }
+    }
+}
+
+/// 视图关闭：压回置底（精确 Rgn 由前端动画结束后重报）
+pub fn lower_after_view(app: &AppHandle, label: &str) {
+    let Some(w) = app.get_webview_window(label) else { return };
+    let _ = w.set_always_on_bottom(true);
+    apply_desk_style(&w);
+    push_bottom(&w);
+}
 
 pub fn hide_win(win: &tauri::WebviewWindow) {
     if let Ok(hwnd) = win.hwnd() {
@@ -326,10 +394,20 @@ pub fn hide_win(win: &tauri::WebviewWindow) {
     }
 }
 
-/// 创建拖拽层窗口（全局一个，初始隐藏、屏幕外）。
-/// 普通窗口（不置底）：拖动时直接 SetWindowPos(HWND_TOP) 抬升，
-/// 无 tao always_on_bottom flag → 无 InvalidateRgn 整窗重绘问题。
-/// 窗口尺寸由前端按便签尺寸动态设置（见 drag-layer.ts）。
+pub fn show_win_noactivate(win: &tauri::WebviewWindow) {
+    if let Ok(hwnd) = win.hwnd() {
+        unsafe {
+            let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 拖拽层窗口
+// ---------------------------------------------------------------------------
+
+const DRAG_LAYER_MARGIN: f64 = 30.0; // 卡片阴影边距（CSS px），与 drag-layer.ts 一致
+
 fn create_drag_layer(app: &AppHandle) {
     let r = WebviewWindowBuilder::new(app, "drag-layer", WebviewUrl::App("index.html".into()))
         .title("slip-drag")
@@ -352,14 +430,6 @@ fn create_drag_layer(app: &AppHandle) {
     }
 }
 
-pub fn show_win_noactivate(win: &tauri::WebviewWindow) {
-    if let Ok(hwnd) = win.hwnd() {
-        unsafe {
-            let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
-        }
-    }
-}
-
 // ---------------------------------------------------------------------------
 // 全屏检测
 // ---------------------------------------------------------------------------
@@ -372,7 +442,6 @@ fn window_class(hwnd: HWND) -> String {
     }
 }
 
-/// 桌面自身（Progman/WorkerW/SHELLDLL_DefView）的前台事件要排除，否则误判全屏
 fn is_desktop_window(hwnd: HWND) -> bool {
     matches!(
         window_class(hwnd).as_str(),
@@ -380,13 +449,10 @@ fn is_desktop_window(hwnd: HWND) -> bool {
     )
 }
 
-/// 前台窗口是否在显示器 m 上处于全屏（窗口矩形覆盖整个 rcMonitor，含任务栏区域）
 fn is_fullscreen_on(hwnd: HWND, m: &MonitorSlot) -> bool {
     if hwnd.0.is_null() || is_desktop_window(hwnd) {
         return false;
     }
-    // 带标题栏（WS_CAPTION）的普通可缩放窗口不算全屏——即使矩形覆盖显示器（如最大化、
-    // 拖到屏幕边缘吸附），也非"全屏应用"，避免误判隐藏画布。
     let style = unsafe { GetWindowLongPtrW(hwnd, GWL_STYLE) };
     if style & (WS_CAPTION.0 as isize) != 0 {
         return false;
@@ -405,115 +471,254 @@ fn is_fullscreen_on(hwnd: HWND, m: &MonitorSlot) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// 管理器主体
+// 状态广播
 // ---------------------------------------------------------------------------
 
-/// 默认假便签（spike 数据，物理像素 / 虚拟屏坐标）
-pub fn default_notes() -> Vec<Note> {
-    vec![
-        Note {
-            id: "n1".into(),
-            x: 250.0,
-            y: 180.0,
-            w: 220.0,
-            h: 170.0,
-            color: "#fff3b0".into(),
-            kind: "text".into(),
-            text: "买牛奶和鸡蛋 🥛🥚".into(),
-            items: vec![],
-        },
-        Note {
-            id: "n2".into(),
-            x: 620.0,
-            y: 340.0,
-            w: 240.0,
-            h: 200.0,
-            color: "#d8f3dc".into(),
-            kind: "checklist".into(),
-            text: "周末清单".into(),
-            items: vec![
-                CheckItem { text: "洗车".into(), done: false },
-                CheckItem { text: "交电费".into(), done: false },
-                CheckItem { text: "给花浇水".into(), done: true },
-            ],
-        },
-        Note {
-            id: "n3".into(),
-            x: 1080.0,
-            y: 140.0,
-            w: 260.0,
-            h: 180.0,
-            color: "#ffd6e0".into(),
-            kind: "text".into(),
-            text: "灵感：让纸筏把纸条送到每台设备".into(),
-            items: vec![],
-        },
-        Note {
-            id: "n4".into(),
-            x: 200.0,
-            y: 150.0,
-            w: 260.0,
-            h: 160.0,
-            color: "#caf0f8".into(),
-            kind: "text".into(),
-            text: "跨屏拖动测试卡：把我拖到另一个屏幕".into(),
-            items: vec![],
-        },
-    ]
+fn state_payload_inner(g: &AppState) -> serde_json::Value {
+    serde_json::json!({
+        "notes": g.store.notes,
+        "ephemeral": g.store.ephemeral,
+        "monitors": g.monitors.iter().map(|m| serde_json::json!({
+            "rect": [m.rect.left, m.rect.top, m.rect.right, m.rect.bottom],
+            "dpi": m.dpi,
+            "primary": m.primary,
+        })).collect::<Vec<_>>(),
+        "virtualRect": [g.virtual_rect.left, g.virtual_rect.top,
+                        g.virtual_rect.right, g.virtual_rect.bottom],
+        "primaryIndex": g.primary,
+        "view": g.view,
+        "editing": g.editing,
+        "fullscreenHidden": g.fullscreen_hidden,
+        "sidebarCollapsed": g.sidebar_collapsed,
+        "sidebarRect": g.sidebar_rect,
+        "timeOffset": g.store.time_offset,
+        "journal": g.store.journal_meta(30),
+    })
 }
 
-impl Inner {
+fn sidebar_physical_rect(m: &MonitorSlot) -> (f64, f64, f64, f64) {
+    let s = m.scale();
+    let w = action::SIDEBAR_W_CSS * s;
+    (
+        m.rect.right as f64 - w,
+        m.rect.top as f64,
+        w,
+        (m.rect.bottom - m.rect.top) as f64,
+    )
+}
+
+impl AppState {
     pub fn new(app: &AppHandle) -> Self {
         let monitors = enumerate_monitors();
         let virtual_rect = virtual_bounds(&monitors);
-        let mut inner = Inner {
+        let primary = monitors.iter().position(|m| m.primary).unwrap_or(0);
+        let mut state = AppState {
             monitors,
             virtual_rect,
-            notes: default_notes(),
+            primary,
+            store: Store::new(),
+            view: None,
+            sidebar_collapsed: false,
+            sidebar_rect: None,
+            console_visible: true,
             editing: None,
             editing_since: None,
-            fullscreen_hidden: Vec::new(),
+            fullscreen_hidden: Vec::new(), // 在窗口创建后按屏数初始化（见下方）
             canvas_dpr: Default::default(),
+            hwnds: Default::default(),
             drag_layer_ready: false,
             drag_layer_shown: false,
             drag_layer_dpr: None,
             event_ids: Vec::new(),
         };
-        inner.rebuild_canvases(app);
+        // 启动窗口创建（此时尚未上锁）
+        let monitors = state.monitors.clone();
+        let primary = state.primary;
+        rebuild_windows(app, &monitors, primary);
+        state.sidebar_rect = monitors.get(primary).map(sidebar_physical_rect);
+        state.fullscreen_hidden = vec![false; monitors.len()];
         create_drag_layer(app);
-        inner
+        // 启动后 3s 自动收回一次（种子含 40 天旧便签 → 未确认演示）
+        let h = app.clone();
+        thread::Builder::new()
+            .name("auto-archive-start".into())
+            .spawn(move || {
+                thread::sleep(Duration::from_secs(3));
+                if let Some(s) = h.try_state::<Arc<AppLock>>() {
+                    let payload = {
+                        let mut g = s.lock();
+                        let changed = g.store.auto_archive();
+                        if changed.is_empty() {
+                            None
+                        } else {
+                            Some(state_payload_inner(&g))
+                        }
+                    };
+                    if let Some(p) = payload {
+                        let _ = h.emit("state", p);
+                    }
+                }
+            })
+            .ok();
+        state
     }
 
-    /// 每显示器一个画布窗口
-    fn rebuild_canvases(&mut self, app: &AppHandle) {
-        // 拖动中拓扑重建（拔显示器）会销毁画布窗口 → pointer 事件终止，
-        // drag-end/cancel 永不到达 → 必须主动清理拖拽层，否则残留屏幕 + 卡片永久隐藏
-        self.dismiss_drag_layer(app);
-        // 关掉所有旧画布窗口（不能按 monitors.len() 推断：显示器数量减少时
-        // 旧索引的窗口不在新拓扑里，按 len 关会残留幽灵画布窗口）
-        let old: Vec<String> = app
-            .webview_windows()
-            .values()
-            .filter(|w| w.label().starts_with("canvas-"))
-            .map(|w| w.label().to_string())
+    pub fn state_payload(&self, _app: &AppHandle) -> serde_json::Value {
+        state_payload_inner(self)
+    }
+
+    /// 前台窗口变化（⚠️ 锁内零 Win32：fg 与全屏判定由调用方锁外算好传入——
+    /// GetWindowRect/GetWindowLongPtrW 对外窗口可能阻塞，锁内调用会把 hook
+    /// 线程卡成“持锁 + 等对方线程”，饿死全部动作命令（死锁纪律））
+    pub fn on_foreground_change(
+        &mut self,
+        app: &AppHandle,
+        is_location_change: bool,
+        fg: HWND,
+        fulls: &[bool],
+    ) -> HookOutcome {
+        let mut ops: Vec<WinOp> = Vec::new();
+        let mut edit_end: Option<String> = None;
+
+        if !is_location_change {
+            let in_grace = self
+                .editing_since
+                .map(|t| t.elapsed() < Duration::from_millis(1500))
+                .unwrap_or(false);
+            if let Some(editing_label) = self.editing.clone() {
+                if !in_grace {
+                    let editing_hwnd = self.hwnds.get(&editing_label).copied();
+                    let still_focused = editing_hwnd.map(|h| h == fg.0 as usize).unwrap_or(false);
+                    if !still_focused {
+                        self.editing = None;
+                        self.editing_since = None;
+                        ops.push(WinOp::PushBottom(editing_label.clone()));
+                        edit_end = Some(editing_label);
+                    }
+                }
+            }
+
+            // 前台已切走：非编辑、非前台、且非视图抬升中的画布 + 边栏统一回压
+            let view_label = self.view.as_ref().map(|v| v.label.clone());
+            if self.editing.is_none() {
+                for i in 0..self.monitors.len() {
+                    let label = canvas_label(i);
+                    if view_label.as_deref() == Some(label.as_str()) {
+                        continue;
+                    }
+                    let h = self.hwnds.get(&label).copied();
+                    if h.map(|h| h == fg.0 as usize).unwrap_or(false) {
+                        continue;
+                    }
+                    ops.push(WinOp::PushBottom(label));
+                }
+                if view_label.as_deref() != Some("sidebar") {
+                    let h = self.hwnds.get("sidebar").copied();
+                    if h.map(|h| h != fg.0 as usize).unwrap_or(true) {
+                        ops.push(WinOp::PushBottom("sidebar".into()));
+                    }
+                }
+            }
+        }
+
+        // 全屏检测：排除画布/边栏/拖拽层自身（缓存 hwnd 比较）
+        let fg_u = fg.0 as usize;
+        let fg_is_self = (0..self.monitors.len()).any(|i| {
+            self.hwnds
+                .get(&canvas_label(i))
+                .map(|h| *h == fg_u)
+                .unwrap_or(false)
+        }) || self.hwnds.get("sidebar").map(|h| *h == fg_u).unwrap_or(false)
+            || self.hwnds.get("drag-layer").map(|h| *h == fg_u).unwrap_or(false);
+        if fg_is_self {
+            return HookOutcome { ops, edit_end };
+        }
+
+        // Y7：按显示器分别跟踪全屏隐藏。任一屏全屏 → 全部窗口隐藏；
+        // 只有最后一屏也退出全屏时才恢复。
+        let all_labels: Vec<String> = (0..self.monitors.len())
+            .map(canvas_label)
+            .chain(std::iter::once("sidebar".to_string()))
+            .chain(std::iter::once("drag-layer".to_string()))
             .collect();
-        for label in old {
-            if let Some(w) = app.get_webview_window(&label) {
-                let _ = w.close();
+        let was_hidden = self.fullscreen_hidden.iter().any(|b| *b);
+        for (i, _m) in self.monitors.iter().enumerate() {
+            let full = fulls.get(i).copied().unwrap_or(false);
+            if full && !self.fullscreen_hidden[i] {
+                self.fullscreen_hidden[i] = true;
+            } else if !full && self.fullscreen_hidden[i] {
+                self.fullscreen_hidden[i] = false;
             }
         }
-        self.fullscreen_hidden.clear();
-        self.editing = None;
-        // 重建
-        for (i, m) in self.monitors.iter().enumerate() {
-            let label = canvas_label(i);
-            if let Err(e) = create_canvas_window(app, &label, &m.rect) {
-                log::warn!("创建画布窗口 {label} 失败: {e}");
+        let now_hidden = self.fullscreen_hidden.iter().any(|b| *b);
+        if !was_hidden && now_hidden {
+            // 进入全屏：全部窗口隐藏（只此一处，避免重复 Hide）
+            for label in &all_labels {
+                ops.push(WinOp::Hide(label.clone()));
             }
+        } else if was_hidden && !now_hidden {
+            // 全部屏退出全屏：恢复窗口 + 回压置底
+            for label in &all_labels {
+                ops.push(WinOp::Show(label.clone()));
+                ops.push(WinOp::PushBottom(label.clone()));
+            }
+        }
+        let _ = app;
+        HookOutcome { ops, edit_end }
+    }
+}
+
+/// 前台变化处理结果（锁外执行）
+pub(crate) struct HookOutcome {
+    pub ops: Vec<WinOp>,
+    pub edit_end: Option<String>,
+}
+
+fn exec_hook_outcome(app: &AppHandle, o: HookOutcome) {
+    if let Some(label) = o.edit_end {
+        if let Some(w) = app.get_webview_window(&label) {
+            let _ = w.emit("edit-end", ());
         }
     }
+    exec_win_ops(app, o.ops);
+}
 
-    /// 清理拖拽层（拖动中断兜底：重建画布等场景）——隐藏窗口 + 复位状态
+/// 重建画布 + 边栏窗口（⚠️ 纯窗口操作：锁外调用，绝不持 AppState 锁——
+/// WebView2 窗口创建可能阻塞，持锁会饿死主线程/动作命令）
+fn rebuild_windows(app: &AppHandle, monitors: &[MonitorSlot], primary: usize) {
+    let old: Vec<String> = app
+        .webview_windows()
+        .values()
+        .filter(|w| w.label().starts_with("canvas-") || w.label() == "sidebar")
+        .map(|w| w.label().to_string())
+        .collect();
+    for label in &old {
+        if let Some(w) = app.get_webview_window(label) {
+            let _ = w.close();
+        }
+    }
+    // 清掉已销毁窗口的 hwnd 缓存（新窗口创建时 record_hwnd 会补上）
+    if let Some(state) = app.try_state::<Arc<AppLock>>() {
+        let mut g = state.lock();
+        for l in &old {
+            g.hwnds.remove(l);
+        }
+    }
+    for (i, m) in monitors.iter().enumerate() {
+        let label = canvas_label(i);
+        if let Err(e) = create_canvas_window(app, &label, &m.rect) {
+            log::warn!("创建画布窗口 {label} 失败: {e}");
+        }
+    }
+    if let Some(pm) = monitors.get(primary) {
+        if let Err(e) = create_sidebar_window(app, pm) {
+            log::warn!("创建边栏窗口失败: {e}");
+        }
+    }
+}
+
+impl AppState {
+    #[allow(dead_code)]
     fn dismiss_drag_layer(&mut self, app: &AppHandle) {
         if !self.drag_layer_shown {
             return;
@@ -523,190 +728,10 @@ impl Inner {
         }
         self.drag_layer_shown = false;
     }
-
-    /// 每显示器内属于它的便签（按中心点归属，物理坐标）
-    fn notes_for_monitor(&self, mi: usize) -> Vec<Note> {
-        let m = &self.monitors[mi];
-        self.notes
-            .iter()
-            .filter(|n| {
-                let cx = n.x + n.w / 2.0;
-                let cy = n.y + n.h / 2.0;
-                cx >= m.rect.left as f64
-                    && cx < m.rect.right as f64
-                    && cy >= m.rect.top as f64
-                    && cy < m.rect.bottom as f64
-            })
-            .cloned()
-            .collect()
-    }
-
-    fn emit_notes(&self, app: &AppHandle, labels: &[String]) {
-        for (i, _) in self.monitors.iter().enumerate() {
-            let label = canvas_label(i);
-            if !labels.contains(&label) {
-                continue;
-            }
-            if let Some(w) = app.get_webview_window(&label) {
-                let notes = self.notes_for_monitor(i);
-                let _ = w.emit("notes-for-canvas", notes);
-            }
-        }
-    }
-
-    fn emit_state(&self, app: &AppHandle) {
-        let _ = app.emit(
-            "state-updated",
-            serde_json::json!({
-                "monitors": self.monitors.iter().map(|m| {
-                    serde_json::json!({
-                        "rect": [m.rect.left, m.rect.top, m.rect.right, m.rect.bottom],
-                        "dpi": m.dpi,
-                    })
-                }).collect::<Vec<_>>(),
-                "virtualRect": [self.virtual_rect.left, self.virtual_rect.top,
-                                self.virtual_rect.right, self.virtual_rect.bottom],
-                "editing": self.editing,
-                "fullscreenHidden": self.fullscreen_hidden,
-                "notes": self.notes.iter().map(|n| serde_json::json!({
-                    "id": n.id, "x": n.x, "y": n.y, "w": n.w, "h": n.h,
-                })).collect::<Vec<_>>(),
-            }),
-        );
-    }
-
-    /// 前台窗口变化 → 全屏检测 + 编辑失焦检测（在主线程消息泵里执行）
-    pub fn on_foreground_change(&mut self, app: &AppHandle, is_location_change: bool) {
-        let fg = unsafe { GetForegroundWindow() };
-
-        // 编辑失焦 + 回压只在"前台切换"事件里做；LOCATIONCHANGE（窗口移动/缩放，事件密集）
-        // 不做这两件事，否则拖动其他窗口时会频繁 SetWindowPos 回压，导致便签 z-order 抖动闪烁。
-        if !is_location_change {
-            // 1) 编辑失焦：前台不再是编辑中的画布 → 结束编辑态
-            //    注意：set_focus 是异步消息，编辑开始后短暂窗口期内前台可能仍是旧窗口，
-            //    用 1.5s 宽容期等待前台切换完成，避免误杀。
-            //    宽容期只跳过"编辑失焦判定"，不 return——全屏检测必须照常执行
-            //    （否则编辑开始后 1.5s 内进入全屏，画布不会隐藏）。
-            let in_grace = self
-                .editing_since
-                .map(|t| t.elapsed() < Duration::from_millis(1500))
-                .unwrap_or(false);
-            if let Some(editing_label) = self.editing.clone() {
-                if !in_grace {
-                    let still_focused = app
-                        .get_webview_window(&editing_label)
-                        .and_then(|w| w.hwnd().ok())
-                        .map(|h| h.0 == fg.0)
-                        .unwrap_or(false);
-                    if !still_focused {
-                        if let Some(w) = app.get_webview_window(&editing_label) {
-                            deactivate_editing(&w);
-                        }
-                        self.editing = None;
-                        self.editing_since = None;
-                        if let Some(w) = app.get_webview_window(&editing_label) {
-                            let _ = w.emit("edit-end", ());
-                        }
-                        self.emit_state(app);
-                    }
-                }
-            }
-
-            // 1.5) 前台已切走：所有非编辑、且非前台的画布统一回压
-            //      （覆盖"误点卡片后点别处"的场景；跳过前台画布——点击卡片会激活画布，
-            //       若此时压回底部，Windows 会把前台切走，连锁触发编辑失焦误杀）
-            if self.editing.is_none() {
-                for i in 0..self.monitors.len() {
-                    let label = canvas_label(i);
-                    if let Some(w) = app.get_webview_window(&label) {
-                        if let Ok(h) = w.hwnd() {
-                            if h.0 == fg.0 {
-                                continue;
-                            }
-                        }
-                        push_bottom(&w);
-                    }
-                }
-            }
-        }
-
-        // 2) 全屏检测：逐显示器比较前台窗口
-        //    排除画布窗口自身：拖动时画布窗口会放大到虚拟屏包围盒（单屏下即全屏尺寸），
-        //    若前台是画布自身会被误判为"全屏应用"而隐藏自己。
-        let fg_is_canvas = (0..self.monitors.len()).any(|i| {
-            app.get_webview_window(&canvas_label(i))
-                .and_then(|w| w.hwnd().ok())
-                .map(|h| h.0 == fg.0)
-                .unwrap_or(false)
-        });
-        if fg_is_canvas {
-            return;
-        }
-        for (i, m) in self.monitors.iter().enumerate() {
-            let label = canvas_label(i);
-            let full = is_fullscreen_on(fg, m);
-            let hidden_now = self.fullscreen_hidden.contains(&label);
-            if full && !hidden_now {
-                if let Some(w) = app.get_webview_window(&label) {
-                    hide_win(&w);
-                    self.fullscreen_hidden.push(label.clone());
-                }
-            } else if !full && hidden_now {
-                if let Some(w) = app.get_webview_window(&label) {
-                    show_win_noactivate(&w);
-                    push_bottom(&w);
-                }
-                self.fullscreen_hidden.retain(|l| l != &label);
-            }
-        }
-        if !self.fullscreen_hidden.is_empty() || self.editing.is_some() {
-            self.emit_state(app);
-        }
-    }
-
-    /// watchdog 线程：拓扑检测 + 置底回压（幂等）
-    pub fn watchdog_tick(&mut self, app: &AppHandle) {
-        // 拓扑签名变化 → 重建
-        let now = enumerate_monitors();
-        let same_topology = now.len() == self.monitors.len()
-            && now.iter().zip(&self.monitors).all(|(a, b)| {
-                a.rect.left == b.rect.left
-                    && a.rect.top == b.rect.top
-                    && a.rect.right == b.rect.right
-                    && a.rect.bottom == b.rect.bottom
-                    && a.dpi == b.dpi
-            });
-        if !same_topology {
-            self.monitors = now;
-            self.virtual_rect = virtual_bounds(&self.monitors);
-            self.rebuild_canvases(app);
-            self.emit_state(app);
-            return;
-        }
-
-        // 回压：非编辑中、且非前台的画布窗口压回底部
-        // （窗口刚被点击激活的瞬间 editing 尚未设置，跳过避免打断点击/焦点；
-        //   之后 card-focus 会将其提升，前台切换会统一回压）
-        let fg = unsafe { GetForegroundWindow() };
-        for i in 0..self.monitors.len() {
-            let label = canvas_label(i);
-            if self.editing.as_deref() == Some(label.as_str()) {
-                continue;
-            }
-            if let Some(w) = app.get_webview_window(&label) {
-                if let Ok(h) = w.hwnd() {
-                    if h.0 == fg.0 {
-                        continue;
-                    }
-                }
-                push_bottom(&w);
-            }
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
-// WinEvent hook
+// WinEvent hook（消息泵线程；回调内先锁后释放，Win32 操作离开锁执行）
 // ---------------------------------------------------------------------------
 
 unsafe extern "system" fn foreground_hook(
@@ -718,29 +743,43 @@ unsafe extern "system" fn foreground_hook(
     _thread: u32,
     _time: u32,
 ) {
-    // 只关心：前台切换 + 前台窗口的尺寸/位置变化（全屏进入/退出会触发 LOCATIONCHANGE）
     if event == HOOK_EVENT_FG {
         // FOREGROUND：正常处理
     } else if event == HOOK_EVENT_LOC && id_object == 0 {
-        // OBJID_WINDOW 的位置/尺寸变化；只处理前台窗口，过滤噪音
         let fg = GetForegroundWindow();
         if hwnd != fg {
             return;
         }
+    } else if event == HOOK_EVENT_DISPLAYCHANGE {
+        // 显示器拓扑变化 → 重建（锁外；窗口创建可能阻塞）
+        let Some(lock) = HOOK_APP.get() else { return };
+        let Ok(guard) = lock.lock() else { return };
+        let Some(app) = guard.clone() else { return };
+        handle_topology_change(&app);
+        return;
     } else {
         return;
     }
     let is_location_change = event == HOOK_EVENT_LOC;
     let Some(lock) = HOOK_APP.get() else { return };
     let Ok(guard) = lock.lock() else { return };
-    let Some(app) = guard.clone() else {
-        return;
-    };
-    if let Some(state) = app.try_state::<Arc<Mutex<Inner>>>() {
-        let inner = state.inner();
-        if let Ok(mut g) = inner.lock() {
-            g.on_foreground_change(&app, is_location_change);
-        }
+    let Some(app) = guard.clone() else { return };
+    if let Some(state) = app.try_state::<Arc<AppLock>>() {
+        // ⚠️ 锁外 Win32：GetForegroundWindow（全局读）+ 每屏 is_fullscreen_on
+        // （GetWindowRect/GetWindowLongPtrW 对外窗口可能阻塞——绝不能持锁调用）
+        let fg = unsafe { GetForegroundWindow() };
+        let fulls = {
+            let g = state.lock();
+            let mons = g.monitors.clone();
+            drop(g);
+            mons.iter().map(|m| is_fullscreen_on(fg, m)).collect::<Vec<bool>>()
+        };
+        let outcome = {
+            let mut g = state.lock();
+            g.on_foreground_change(&app, is_location_change, fg, &fulls)
+        };
+        // 锁外：emit（需要主线程）+ Win32 操作
+        exec_hook_outcome(&app, outcome);
     }
 }
 
@@ -749,78 +788,166 @@ fn install_hook(app: &AppHandle) {
     if let Ok(mut g) = lock.lock() {
         *g = Some(app.clone());
     }
-    // out-of-context hook 的回调依赖"注册线程的消息泵"。
-    // tao 主线程消息循环对线程消息分发不可靠，因此用专用线程跑独立消息泵。
     let hook_app = app.clone();
-    thread::spawn(move || {
-        unsafe {
-            let hook_fg = SetWinEventHook(
-                HOOK_EVENT_FG,
-                HOOK_EVENT_FG,
-                None,
-                Some(foreground_hook),
-                0,
-                0,
-                WINEVENT_OUTOFCONTEXT,
-            );
-            let hook_loc = SetWinEventHook(
-                HOOK_EVENT_LOC,
-                HOOK_EVENT_LOC,
-                None,
-                Some(foreground_hook),
-                0,
-                0,
-                WINEVENT_OUTOFCONTEXT,
-            );
-            log::info!(
-                "[spike] WinEvent hooks 已注册（专用消息泵线程） fg=0x{:x} loc=0x{:x}",
-                hook_fg.0 as usize,
-                hook_loc.0 as usize
-            );
-            let mut msg = MSG::default();
-            while GetMessageW(&mut msg, None, 0, 0).as_bool() {
-                let _ = TranslateMessage(&msg);
-                DispatchMessageW(&msg);
+    thread::Builder::new()
+        .name("win-event-hook".into())
+        .spawn(move || {
+            register_thread_name("win-event-hook");
+            unsafe {
+                let hook_fg = SetWinEventHook(
+                    HOOK_EVENT_FG,
+                    HOOK_EVENT_FG,
+                    None,
+                    Some(foreground_hook),
+                    0,
+                    0,
+                    WINEVENT_OUTOFCONTEXT,
+                );
+                let hook_loc = SetWinEventHook(
+                    HOOK_EVENT_LOC,
+                    HOOK_EVENT_LOC,
+                    None,
+                    Some(foreground_hook),
+                    0,
+                    0,
+                    WINEVENT_OUTOFCONTEXT,
+                );
+                let hook_disp = SetWinEventHook(
+                    HOOK_EVENT_DISPLAYCHANGE,
+                    HOOK_EVENT_DISPLAYCHANGE,
+                    None,
+                    Some(foreground_hook),
+                    0,
+                    0,
+                    WINEVENT_OUTOFCONTEXT,
+                );
+                log::info!(
+                    "[slip] WinEvent hooks 已注册 fg=0x{:x} loc=0x{:x} disp=0x{:x}",
+                    hook_fg.0 as usize,
+                    hook_loc.0 as usize,
+                    hook_disp.0 as usize
+                );
+                let mut msg = MSG::default();
+                while GetMessageW(&mut msg, None, 0, 0).as_bool() {
+                    let _ = TranslateMessage(&msg);
+                    DispatchMessageW(&msg);
+                }
+                let _ = UnhookWinEvent(hook_fg);
+                let _ = UnhookWinEvent(hook_loc);
+                let _ = UnhookWinEvent(hook_disp);
+                log::info!("[slip] WinEvent hook 消息泵线程退出");
             }
-            let _ = UnhookWinEvent(hook_fg);
-            let _ = UnhookWinEvent(hook_loc);
-            log::info!("[spike] WinEvent hook 消息泵线程退出");
-        }
-        let _ = hook_app;
-    });
+            let _ = hook_app;
+        })
+        .ok();
 }
 
-/// 启动 watchdog 线程（拓扑 + 回压）
-pub fn start_watchdog(app: AppHandle) {
-    thread::spawn(move || loop {
-        thread::sleep(WATCHDOG_INTERVAL);
-        let Some(state) = app.try_state::<Arc<Mutex<Inner>>>() else {
-            break;
-        };
-        let inner = state.inner();
-        if let Ok(mut g) = inner.lock() {
-            g.watchdog_tick(&app);
+/// 自动收回定时器（Rust 宿主，AI 路径同入口）
+/// 注：原 watchdog 线程已移除——拓扑检测改由 WinEvent hook（EVENT_DISPLAYCHANGE）
+/// 触发，z-order 回压由前台切换 hook 负责；后台线程不再周期调用 Win32/枚举，
+/// 杜绝"持锁 + SendMessage 到主线程"的整窗未响应死锁。
+pub fn start_auto_archive(app: AppHandle) {
+    thread::Builder::new()
+        .name("auto-archive".into())
+        .spawn(move || {
+            register_thread_name("auto-archive");
+            loop {
+                thread::sleep(AUTO_ARCHIVE_INTERVAL);
+                let Some(state) = app.try_state::<Arc<AppLock>>() else {
+                    break;
+                };
+                let payload = {
+                    let mut g = state.lock();
+                    let changed = g.store.auto_archive();
+                    if changed.is_empty() {
+                        None
+                    } else {
+                        Some(state_payload_inner(&g))
+                    }
+                };
+                if let Some(p) = payload {
+                    let _ = app.emit("state", p);
+                }
+            }
+        })
+        .ok();
+}
+
+/// 拓扑变化 → 锁外重建（hook 线程调用；锁内只更新字段）
+/// ⚠️ 锁内零 Win32：enumerate_monitors 先锁外枚举，锁内只比较/赋值（R2）
+fn handle_topology_change(app: &AppHandle) {
+    let Some(state) = app.try_state::<Arc<AppLock>>() else {
+        return;
+    };
+    let now = enumerate_monitors();
+    let (monitors, primary, was_drag_shown) = {
+        let mut g = state.lock();
+        let same = now.len() == g.monitors.len()
+            && now.iter().zip(&g.monitors).all(|(a, b)| {
+                a.rect.left == b.rect.left
+                    && a.rect.top == b.rect.top
+                    && a.rect.right == b.rect.right
+                    && a.rect.bottom == b.rect.bottom
+                    && a.dpi == b.dpi
+                    && a.primary == b.primary
+            });
+        if same {
+            return;
         }
-    });
+        log::warn!(
+            "[slip] 拓扑变化：{} 屏 → {} 屏，重建窗口",
+            g.monitors.len(),
+            now.len()
+        );
+        g.monitors = now;
+        g.virtual_rect = virtual_bounds(&g.monitors);
+        g.primary = g.monitors.iter().position(|m| m.primary).unwrap_or(0);
+        g.fullscreen_hidden = vec![false; g.monitors.len()];
+        g.editing = None;
+        let was = g.drag_layer_shown;
+        g.drag_layer_shown = false;
+        (g.monitors.clone(), g.primary, was)
+    };
+    drop_and_rebuild(app, &monitors, primary, was_drag_shown);
+    if let Some(s) = app.try_state::<Arc<AppLock>>() {
+        let payload = {
+            let mut g = s.lock();
+            g.sidebar_rect = monitors.get(primary).map(sidebar_physical_rect);
+            state_payload_inner(&g)
+        };
+        let _ = app.emit("state", payload);
+    }
 }
 
 /// 初始化入口（在 tauri setup 里调用）
 pub fn setup(app: &AppHandle) {
-    let state = Arc::new(Mutex::new(Inner::new(app)));
+    register_thread_name("main-thread"); // G3：主线程注册诊断名
+    let state = Arc::new(AppLock::new(AppState::new(app)));
+    state.start_monitor();
     app.manage(state);
     install_hook(app);
-    start_watchdog(app.clone());
-    // 初始全屏检查 + 初始状态广播
-    if let Some(s) = app.try_state::<Arc<Mutex<Inner>>>() {
-        if let Ok(mut g) = s.inner().lock() {
-            g.on_foreground_change(app, false);
-            g.emit_state(app);
-        }
+    start_auto_archive(app.clone());
+    if let Some(s) = app.try_state::<Arc<AppLock>>() {
+        let fg = unsafe { GetForegroundWindow() };
+        let fulls = {
+            let g = s.lock();
+            let mons = g.monitors.clone();
+            drop(g);
+            mons.iter().map(|m| is_fullscreen_on(fg, m)).collect::<Vec<bool>>()
+        };
+        let (outcome, payload) = {
+            let mut g = s.lock();
+            let outcome = g.on_foreground_change(app, false, fg, &fulls);
+            let payload = state_payload_inner(&g);
+            (outcome, payload)
+        };
+        exec_hook_outcome(app, outcome);
+        let _ = app.emit("state", payload);
     }
 }
 
 // ---------------------------------------------------------------------------
-// IPC payloads
+// IPC payloads（SPIKE 事件保留；处理器 = 锁内数据 + 锁外 Win32）
 // ---------------------------------------------------------------------------
 
 #[derive(Deserialize)]
@@ -880,80 +1007,68 @@ pub struct LabelPayload {
     pub label: String,
 }
 
-/// 前端 canvas-init：登记 DPR 并下发本屏便签
 pub fn handle_canvas_init(app: &AppHandle, p: CanvasInitPayload) {
-    let Some(state) = app.try_state::<Arc<Mutex<Inner>>>() else {
+    let Some(state) = app.try_state::<Arc<AppLock>>() else {
         return;
     };
-    let inner = state.inner();
-    if let Ok(mut g) = inner.lock() {
+    let payload = {
+        let mut g = state.lock();
         g.canvas_dpr.insert(p.label.clone(), p.dpr);
-        g.emit_notes(app, &[p.label]);
-        g.emit_state(app);
+        Some(state_payload_inner(&g))
+    };
+    if let Some(p) = payload {
+        let _ = app.emit("state", p);
     }
 }
 
-/// 拖拽层前端就绪（页面加载完成 + 上报自身 DPR）→ 允许显示拖拽层
 pub fn handle_drag_layer_ready(app: &AppHandle, p: DragLayerReadyPayload) {
-    let Some(state) = app.try_state::<Arc<Mutex<Inner>>>() else {
+    let Some(state) = app.try_state::<Arc<AppLock>>() else {
         return;
     };
-    let inner = state.inner();
-    if let Ok(mut g) = inner.lock() {
-        g.drag_layer_ready = true;
-        g.drag_layer_dpr = Some(p.dpr);
-        log::info!("[spike] 拖拽层就绪 dpr={}", p.dpr);
-    }
+    let mut g = state.lock();
+    g.drag_layer_ready = true;
+    g.drag_layer_dpr = Some(p.dpr);
+    log::info!("[slip] 拖拽层就绪 dpr={}", p.dpr);
 }
 
-/// 前端 update-regions：重算窗口区域（SetWindowRgn）
 pub fn handle_update_regions(app: &AppHandle, p: UpdateRegionsPayload) {
-    let Some(state) = app.try_state::<Arc<Mutex<Inner>>>() else {
+    let Some(state) = app.try_state::<Arc<AppLock>>() else {
         return;
     };
-    let inner = state.inner();
-    let Ok(g) = inner.lock() else {
-        return;
+    let dpr = {
+        let g = state.lock();
+        g.canvas_dpr.get(&p.label).copied().unwrap_or(1.0)
     };
-    let dpr = g.canvas_dpr.get(&p.label).copied().unwrap_or(1.0);
-    if let Some(w) = app.get_webview_window(&p.label) {
-        let rects: Vec<(f64, f64, f64, f64)> =
-            p.rects.iter().map(|r| (r.x, r.y, r.w, r.h)).collect();
-        apply_region(&w, &rects, dpr);
-    }
+    let rects: Vec<(f64, f64, f64, f64)> = p.rects.iter().map(|r| (r.x, r.y, r.w, r.h)).collect();
+    exec_win_ops(app, vec![WinOp::Region(p.label.clone(), dpr, rects)]);
 }
 
-/// 前端 drag-start：显示拖拽层窗口（内容 = 被拖便签副本）并抬到最顶。
-/// 画布窗口不动 → 其他便签保持在桌面层，只有被拖便签浮在所有普通窗口之上。
-/// 拖拽层未就绪（首次拖动早于页面加载）→ 不回执，前端降级：不隐藏原卡片、
-/// clamp 在窗口内拖动（无抬升，便签可能被遮挡，仅启动后瞬间的极小概率）。
-/// 回执 drag-layer-shown 后前端才隐藏原卡片（避免双卡残影）。
 pub fn handle_drag_start(app: &AppHandle, p: DragStartPayload) {
-    let Some(state) = app.try_state::<Arc<Mutex<Inner>>>() else {
+    let Some(state) = app.try_state::<Arc<AppLock>>() else {
         return;
     };
-    let inner = state.inner();
-    let Ok(mut g) = inner.lock() else {
-        return;
-    };
-    if !g.drag_layer_ready {
-        return;
-    }
-    let Some(note) = g.notes.iter().find(|n| n.id == p.id).cloned() else {
-        return;
+    // 锁内：取数据
+    let (note, dl_dpr) = {
+        let g = state.lock();
+        if !g.drag_layer_ready {
+            return;
+        }
+        let note = match g.store.notes.iter().find(|n| n.id == p.id).cloned() {
+            Some(n) => n,
+            None => return,
+        };
+        (note, g.drag_layer_dpr.unwrap_or(1.0))
     };
     let Some(dl) = app.get_webview_window("drag-layer") else {
         return;
     };
-    // 实时重查 DPR（层窗口可能位于不同 DPI 的显示器，就绪时上报的缓存值会过期）
-    let dpr = dl.hwnd().map(window_scale).unwrap_or_else(|_| g.drag_layer_dpr.unwrap_or(1.0));
-    let margin = DRAG_LAYER_MARGIN * dpr; // 阴影边距（物理 px）
-    // 内容注入（物理尺寸 → 前端按自身 DPR 换算 CSS）
+    // 锁外：Win32 + 事件
+    let dpr = dl.hwnd().map(window_scale).unwrap_or(dl_dpr);
+    let margin = DRAG_LAYER_MARGIN * dpr;
     let _ = dl.emit(
         "drag-layer-show",
         serde_json::json!({ "note": note, "w": p.w, "h": p.h }),
     );
-    // 定位（卡片左上角 - 边距）+ 抬升 + 显示；SWP_NOACTIVATE 不抢前台
     if let Ok(hwnd) = dl.hwnd() {
         set_pos(
             hwnd,
@@ -966,34 +1081,31 @@ pub fn handle_drag_start(app: &AppHandle, p: DragStartPayload) {
         );
     }
     show_win_noactivate(&dl);
+    let mut g = state.lock();
     g.drag_layer_shown = true;
-    // 回执：源窗口隐藏原卡片（视觉移交拖拽层）
+    g.store.ephemeral.dragging = Some(p.id.clone());
+    drop(g);
     if let Some(src) = app.get_webview_window(&p.label) {
         let _ = src.emit("drag-layer-shown", ());
     }
 }
 
-/// 前端 drag-move（拖动中每帧上报）：移动拖拽层窗口到便签新位置。
-/// clamp 到虚拟屏（便签不会丢出所有显示器之外）。
 pub fn handle_drag_move(app: &AppHandle, p: DragMovePayload) {
-    let Some(state) = app.try_state::<Arc<Mutex<Inner>>>() else {
+    let Some(state) = app.try_state::<Arc<AppLock>>() else {
         return;
     };
-    let inner = state.inner();
-    let Ok(g) = inner.lock() else {
-        return;
+    let (shown, virtual_rect, dl_dpr) = {
+        let g = state.lock();
+        (g.drag_layer_shown, g.virtual_rect, g.drag_layer_dpr.unwrap_or(1.0))
     };
-    if !g.drag_layer_shown {
+    if !shown {
         return;
     }
-    let v = g.virtual_rect;
+    let v = virtual_rect;
     let x = p.x.clamp(v.left as f64, (v.right as f64 - p.w).max(v.left as f64));
     let y = p.y.clamp(v.top as f64, (v.bottom as f64 - p.h).max(v.top as f64));
     if let Some(dl) = app.get_webview_window("drag-layer") {
-        let dpr = dl
-            .hwnd()
-            .map(window_scale)
-            .unwrap_or_else(|_| g.drag_layer_dpr.unwrap_or(1.0));
+        let dpr = dl.hwnd().map(window_scale).unwrap_or(dl_dpr);
         let margin = DRAG_LAYER_MARGIN * dpr;
         if let Ok(hwnd) = dl.hwnd() {
             set_pos(
@@ -1009,67 +1121,76 @@ pub fn handle_drag_move(app: &AppHandle, p: DragMovePayload) {
     }
 }
 
-/// 前端 drag-end：更新便签坐标 + 按落点分发到显示器 + 窗口缩回
 pub fn handle_drag_end(app: &AppHandle, p: DragEndPayload) {
-    let Some(state) = app.try_state::<Arc<Mutex<Inner>>>() else {
+    let Some(state) = app.try_state::<Arc<AppLock>>() else {
         return;
     };
-    let inner = state.inner();
-    let Ok(mut g) = inner.lock() else {
-        return;
+    let v = {
+        let g = state.lock();
+        g.virtual_rect
     };
-    // 落点必须 clamp 到虚拟屏（与 drag-move 同规则）：前端上报的是未 clamp 值，
-    // 否则便签中心可能落在所有显示器之外 → 任何画布都不渲染它 → 永久消失。
-    let v = g.virtual_rect;
     let x = p.x.clamp(v.left as f64, (v.right as f64 - p.w).max(v.left as f64));
     let y = p.y.clamp(v.top as f64, (v.bottom as f64 - p.h).max(v.top as f64));
-    if let Some(n) = g.notes.iter_mut().find(|n| n.id == p.id) {
+    let mut g = state.lock();
+    if let Some(n) = g.store.notes.iter_mut().find(|n| n.id == p.id) {
         n.x = x;
         n.y = y;
         n.w = p.w;
         n.h = p.h;
     }
-    // 拖动的便签移到末尾 → 重渲染时 DOM 顺序最后 = 同窗口内层级最高（"刚拖的置顶"）
-    if let Some(pos) = g.notes.iter().position(|n| n.id == p.id) {
-        let n = g.notes.remove(pos);
-        g.notes.push(n);
+    if let Some(pos) = g.store.notes.iter().position(|n| n.id == p.id) {
+        let n = g.store.notes.remove(pos);
+        g.store.notes.push(n);
     }
-    // 隐藏拖拽层（恢复原卡片显示由 emit_notes 重渲染完成）
-    g.dismiss_drag_layer(app);
-    // 全量重发（简单可靠：每窗口拿自己屏内的便签，按中心点自动跨屏归属）
-    let labels: Vec<String> = (0..g.monitors.len()).map(canvas_label).collect();
-    g.emit_notes(app, &labels);
-    g.emit_state(app);
+    g.store.ephemeral.dragging = None;
+    let payload = state_payload_inner(&g);
+    let was_shown = g.drag_layer_shown;
+    if was_shown {
+        g.drag_layer_shown = false;
+    }
+    drop(g);
+    if was_shown {
+        if let Some(dl) = app.get_webview_window("drag-layer") {
+            hide_win(&dl);
+        }
+    }
+    let _ = app.emit("state", payload);
 }
 
-/// 前端 drag-cancel（pointercancel 兜底）：隐藏拖拽层 + 重发本屏便签
-/// （前端重渲染 → 原卡片恢复显示 → 重算 Rgn）。
 pub fn handle_drag_cancel(app: &AppHandle, p: LabelPayload) {
-    let Some(state) = app.try_state::<Arc<Mutex<Inner>>>() else {
+    let Some(state) = app.try_state::<Arc<AppLock>>() else {
         return;
     };
-    let inner = state.inner();
-    let Ok(mut g) = inner.lock() else {
-        return;
+    let (payload, was_shown) = {
+        let mut g = state.lock();
+        g.store.ephemeral.dragging = None;
+        let payload = state_payload_inner(&g);
+        let was_shown = g.drag_layer_shown;
+        g.drag_layer_shown = false;
+        (payload, was_shown)
     };
-    g.dismiss_drag_layer(app);
-    g.emit_notes(app, &[p.label.clone()]);
-    g.emit_state(app);
+    if was_shown {
+        if let Some(dl) = app.get_webview_window("drag-layer") {
+            hide_win(&dl);
+        }
+    }
+    let _ = app.emit("state", payload);
+    let _ = p;
 }
 
-/// 前端 card-focus：进入编辑态（临时激活窗口）
 pub fn handle_card_focus(app: &AppHandle, p: LabelPayload) {
-    let Some(state) = app.try_state::<Arc<Mutex<Inner>>>() else {
+    let Some(state) = app.try_state::<Arc<AppLock>>() else {
         return;
     };
-    let inner = state.inner();
-    let Ok(mut g) = inner.lock() else {
-        return;
+    let (prev, payload) = {
+        let mut g = state.lock();
+        let prev = g.editing.clone();
+        g.editing = Some(p.label.clone());
+        g.editing_since = Some(std::time::Instant::now());
+        (prev, state_payload_inner(&g))
     };
-    // 跨画布切换编辑（多屏：在 A 屏编辑中点 B 屏卡片）：
-    // 必须先退出旧编辑窗口，否则旧窗口保持 always_on_bottom(false) 置顶不回压。
-    // 失焦 FOREGROUND 事件只清理 editing 指向的窗口，不会管旧窗口。
-    if let Some(prev) = g.editing.clone() {
+    // 锁外：跨画布切换编辑先失活旧窗口，再激活新窗口（激活可能阻塞）
+    if let Some(prev) = prev {
         if prev != p.label {
             if let Some(w) = app.get_webview_window(&prev) {
                 deactivate_editing(&w);
@@ -1079,65 +1200,69 @@ pub fn handle_card_focus(app: &AppHandle, p: LabelPayload) {
     if let Some(w) = app.get_webview_window(&p.label) {
         activate_editing(&w);
     }
-    g.editing = Some(p.label.clone());
-    g.editing_since = Some(std::time::Instant::now());
-    g.emit_state(app);
+    let _ = app.emit("state", payload);
 }
 
-/// 前端 card-blur：结束编辑态
 pub fn handle_card_blur(app: &AppHandle, p: LabelPayload) {
-    let Some(state) = app.try_state::<Arc<Mutex<Inner>>>() else {
+    let Some(state) = app.try_state::<Arc<AppLock>>() else {
         return;
     };
-    let inner = state.inner();
-    let Ok(mut g) = inner.lock() else {
-        return;
+    let payload = {
+        let mut g = state.lock();
+        if g.editing.as_deref() == Some(p.label.as_str()) {
+            g.editing = None;
+            g.editing_since = None;
+            Some(state_payload_inner(&g))
+        } else {
+            None
+        }
     };
-    if g.editing.as_deref() == Some(p.label.as_str()) {
+    if payload.is_some() {
         if let Some(w) = app.get_webview_window(&p.label) {
             deactivate_editing(&w);
         }
-        g.editing = None;
-        g.editing_since = None;
-        g.emit_state(app);
+        let _ = app.emit("state", payload);
     }
 }
 
-/// 调试台：强制重建画布
 pub fn handle_rebuild(app: &AppHandle) {
-    let Some(state) = app.try_state::<Arc<Mutex<Inner>>>() else {
+    let Some(state) = app.try_state::<Arc<AppLock>>() else {
         return;
     };
-    let inner = state.inner();
-    if let Ok(mut g) = inner.lock() {
-        g.monitors = enumerate_monitors();
+    let now = enumerate_monitors(); // 锁外枚举（R2）
+    let (monitors, primary, was_drag_shown) = {
+        let mut g = state.lock();
+        g.monitors = now;
         g.virtual_rect = virtual_bounds(&g.monitors);
-        g.rebuild_canvases(app);
-        g.emit_state(app);
-    }
+        g.primary = g.monitors.iter().position(|m| m.primary).unwrap_or(0);
+        g.fullscreen_hidden = vec![false; g.monitors.len()];
+        g.editing = None;
+        let was = g.drag_layer_shown;
+        g.drag_layer_shown = false;
+        (g.monitors.clone(), g.primary, was)
+    };
+    drop_and_rebuild(app, &monitors, primary, was_drag_shown);
+    let mut g = state.lock();
+    g.sidebar_rect = monitors.get(primary).map(sidebar_physical_rect);
+    let payload = state_payload_inner(&g);
+    drop(g);
+    let _ = app.emit("state", payload);
 }
 
-/// 调试台：重置便签到初始位置
-pub fn handle_reset_notes(app: &AppHandle) {
-    let Some(state) = app.try_state::<Arc<Mutex<Inner>>>() else {
-        return;
-    };
-    let inner = state.inner();
-    let Ok(mut g) = inner.lock() else {
-        return;
-    };
-    g.notes = default_notes();
-    let labels: Vec<String> = (0..g.monitors.len()).map(canvas_label).collect();
-    g.emit_notes(app, &labels);
-    g.emit_state(app);
-}
-
-/// 存储 listen 返回的 EventId（防止监听器被注销），返回全部 id
-pub fn push_event_id(app: &AppHandle, id: tauri::EventId) {
-    if let Some(state) = app.try_state::<Arc<Mutex<Inner>>>() {
-        let inner = state.inner();
-        if let Ok(mut g) = inner.lock() {
-            g.event_ids.push(id);
+/// 锁外重建窗口（拓扑变化 / 手动重建共用；重建前先隐藏拖拽层）
+fn drop_and_rebuild(app: &AppHandle, monitors: &[MonitorSlot], primary: usize, was_drag_shown: bool) {
+    if was_drag_shown {
+        if let Some(dl) = app.get_webview_window("drag-layer") {
+            hide_win(&dl);
         }
+    }
+    rebuild_windows(app, monitors, primary);
+}
+
+/// 存储 listen 返回的 EventId（防止监听器被注销）
+pub fn push_event_id(app: &AppHandle, id: tauri::EventId) {
+    if let Some(state) = app.try_state::<Arc<AppLock>>() {
+        let mut g = state.lock();
+        g.event_ids.push(id);
     }
 }

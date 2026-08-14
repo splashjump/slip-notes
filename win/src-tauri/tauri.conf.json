@@ -5,7 +5,7 @@
   "identifier": "com.slip.win",
   "build": {
     "beforeDevCommand": "npm run dev",
-    "devUrl": "http://localhost:1430",
+    "devUrl": "http://localhost:14300",
     "beforeBuildCommand": "npm run build",
     "frontendDist": "../dist"
   },
@@ -14,14 +14,14 @@
     "windows": [
       {
         "label": "main",
-        "title": "slip — spike 调试台",
-        "width": 560,
-        "height": 480,
+        "title": "slip — 控制台",
+        "width": 680,
+        "height": 560,
         "resizable": true
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self' ipc: http://ipc.localhost ws://localhost:* http://localhost:*; img-src 'self' data:"
     }
   },
   "bundle": {

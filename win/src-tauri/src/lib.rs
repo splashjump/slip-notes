@@ -1,91 +1,56 @@
+mod action;
 mod canvas;
+mod lock;
+mod store;
 
 use tauri::Listener;
 use tauri_plugin_log::{Target, TargetKind};
 
 fn bind_events(app: &tauri::AppHandle) {
-    let h = app.clone();
-    let id = app.listen("canvas-init", move |e| {
-        log::info!("[spike] canvas-init 原始事件: {}", e.payload());
-        if let Ok(p) = serde_json::from_str::<canvas::CanvasInitPayload>(e.payload()) {
-            canvas::handle_canvas_init(&h, p);
-        } else {
-            log::warn!("[spike] canvas-init 解析失败");
-        }
-    });
-    canvas::push_event_id(app, id);
-    let h = app.clone();
-    let id = app.listen("update-regions", move |e| {
-        if let Ok(p) = serde_json::from_str::<canvas::UpdateRegionsPayload>(e.payload()) {
-            canvas::handle_update_regions(&h, p);
-        }
-    });
-    canvas::push_event_id(app, id);
-    let h = app.clone();
-    let id = app.listen("drag-layer-ready", move |e| {
-        if let Ok(p) = serde_json::from_str::<canvas::DragLayerReadyPayload>(e.payload()) {
-            canvas::handle_drag_layer_ready(&h, p);
-        }
-    });
-    canvas::push_event_id(app, id);
-    let h = app.clone();
-    let id = app.listen("drag-start", move |e| {
-        if let Ok(p) = serde_json::from_str::<canvas::DragStartPayload>(e.payload()) {
-            canvas::handle_drag_start(&h, p);
-        }
-    });
-    canvas::push_event_id(app, id);
-    let h = app.clone();
-    let id = app.listen("drag-move", move |e| {
-        if let Ok(p) = serde_json::from_str::<canvas::DragMovePayload>(e.payload()) {
-            canvas::handle_drag_move(&h, p);
-        }
-    });
-    canvas::push_event_id(app, id);
-    let h = app.clone();
-    let id = app.listen("drag-end", move |e| {
-        if let Ok(p) = serde_json::from_str::<canvas::DragEndPayload>(e.payload()) {
-            canvas::handle_drag_end(&h, p);
-        }
-    });
-    canvas::push_event_id(app, id);
-    let h = app.clone();
-    let id = app.listen("drag-cancel", move |e| {
-        if let Ok(p) = serde_json::from_str::<canvas::LabelPayload>(e.payload()) {
-            canvas::handle_drag_cancel(&h, p);
-        }
-    });
-    canvas::push_event_id(app, id);
-    let h = app.clone();
-    let id = app.listen("card-focus", move |e| {
-        if let Ok(p) = serde_json::from_str::<canvas::LabelPayload>(e.payload()) {
-            canvas::handle_card_focus(&h, p);
-        }
-    });
-    canvas::push_event_id(app, id);
-    let h = app.clone();
-    let id = app.listen("card-blur", move |e| {
-        if let Ok(p) = serde_json::from_str::<canvas::LabelPayload>(e.payload()) {
-            canvas::handle_card_blur(&h, p);
-        }
-    });
-    canvas::push_event_id(app, id);
+    macro_rules! bind {
+        ($name:literal, $ty:ty, $handler:expr) => {{
+            let h = app.clone();
+            let id = app.listen($name, move |e| {
+                if let Ok(p) = serde_json::from_str::<$ty>(e.payload()) {
+                    $handler(&h, p);
+                } else {
+                    log::warn!("[slip] {} 解析失败", $name);
+                }
+            });
+            canvas::push_event_id(app, id);
+        }};
+    }
+    bind!("canvas-init", canvas::CanvasInitPayload, canvas::handle_canvas_init);
+    bind!("update-regions", canvas::UpdateRegionsPayload, canvas::handle_update_regions);
+    bind!("drag-layer-ready", canvas::DragLayerReadyPayload, canvas::handle_drag_layer_ready);
+    bind!("drag-start", canvas::DragStartPayload, canvas::handle_drag_start);
+    bind!("drag-move", canvas::DragMovePayload, canvas::handle_drag_move);
+    // 注：drag-end 已改走同步 invoke("drag_end")（保证动作顺序），不再经事件双通道（G1）
+    bind!("drag-cancel", canvas::LabelPayload, canvas::handle_drag_cancel);
+    bind!("card-focus", canvas::LabelPayload, canvas::handle_card_focus);
+    bind!("card-blur", canvas::LabelPayload, canvas::handle_card_blur);
     let h = app.clone();
     let id = app.listen("rebuild-canvases", move |_| {
         canvas::handle_rebuild(&h);
     });
     canvas::push_event_id(app, id);
-    let h = app.clone();
-    let id = app.listen("reset-notes", move |_| {
-        canvas::handle_reset_notes(&h);
-    });
-    canvas::push_event_id(app, id);
+}
+
+/// 动作层唯一入口（FORM-PLAN §5）：手势与 AI 指令同构
+#[tauri::command]
+fn action(app: tauri::AppHandle, req: action::ActionRequest) -> action::ActionResponse {
+    action::dispatch(&app, req)
+}
+
+/// 拖拽结束（同步版 drag-end 事件）：先更新坐标再回执，保证后续动作顺序
+#[tauri::command]
+fn drag_end(app: tauri::AppHandle, p: canvas::DragEndPayload) {
+    canvas::handle_drag_end(&app, p);
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .plugin(tauri_plugin_opener::init())
         .plugin(
             tauri_plugin_log::Builder::new()
                 .targets([
@@ -94,6 +59,7 @@ pub fn run() {
                 ])
                 .build(),
         )
+        .invoke_handler(tauri::generate_handler![action, drag_end])
         .setup(|app| {
             let handle = app.handle().clone();
             canvas::setup(&handle);

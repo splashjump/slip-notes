@@ -194,3 +194,50 @@ ephemeral（Rust 侧，不持久化，影响数据行为的 UI 态）：
 - **作者自查（第一轮）**：修 5 处——portal 前置"指针不在 dock 矩形内"；IPC 返回 notes 数组；mock store 限定数据态；T5 补 WebView2 调试端口；M5 双机改多屏
 - **reviewer 审查（第二轮）**：4 🔴 + 12 🟡，全部整合——边栏独立窗口（z-order 解耦，🔴1）；视图 = 画布窗口抬升 + Rgn 全屏 + 窗口内遮罩（🔴2）；ephemeral 态进 Rust + 自动收回 Rust 定时器（🔴3）；T1-T3 统一 CDP 连 tauri dev + M0 补 CDP 基建（🔴4）；🟡：dock 矩形定义、mergeTree/stack 数据语义、30 天阈值补回、常态全屏窗口、动画 Rgn 预算、拖动统一拖拽层+不重渲染被拖卡、undoBatch 归数据动作、editText 动作、take 落点参数、3 秒按钮语义、chips 默认值、视图打开 portal 挂起、时间线拖出走拖拽层、local API 措辞、同步灯离线模式
 - 未修复项（有意保留，进待验证清单）：视图抬升的低频闪现风险（有兜底）；边栏独立窗口的多窗口 Rgn 开销（实测后评估）
+
+## 13. 实施记录（2026-08-14，M0–M4 完成）
+
+> 本节记录实际实施与计划的偏差及关键工程决策，验证后回填 GRILL-PLAN 时以本节为准。
+
+### 13.1 里程碑完成情况
+
+| 里程碑 | 内容 | 状态 |
+|---|---|---|
+| M0 | CDP 基建（`WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9222`，`tests/cdp.mjs` 零依赖连接脚本）+ 窗口壳三区化 | ✅ |
+| M1 | mock store + 动作层(Rust) + 边栏 | ✅ |
+| M2 | 桌面卡 + 拖动/磁吸/叠放/合并 + 传送门 | ✅ |
+| M3 | 档案格 + 归档链 + 控制台 | ✅ |
+| M4 | 视图（最近/时间线）+ 遮罩/抬升 + FLIP 动效 | ✅ |
+| M5 | 全量测试 | 部分：Rust 单测 10 + CDP 冒烟 38 检查全绿；多屏实机/体感验收待做 |
+
+### 13.2 验证资产
+
+- `src-tauri/src/store.rs` 单元测试 10 用例：merge≤4、stack≤9、自动收回 30 天+跳过规则、store/take 往返、slot 操作、tag 清全部、undoBatch 快照、tombstone、时间快进驱动
+- `win/tests/smoke-form.mjs`（CDP 连真实 tauri dev）：T1 真实鼠标手势（Input.dispatchMouseEvent 拖拽刷卡/拖入边栏）、T2 动作层往返、T3 边界（快进 31 天自动收回+未确认+confirm、逾期）、T4 视图开合+借用+portal 挂起、T5 窗口壳+边栏收起——38 检查全绿
+- 跑法：`cd win && .\dev.ps1`（自动带 CDP 端口）→ `node tests/smoke-form.mjs`
+
+### 13.3 工程决策与偏差
+
+1. **vite 端口 1430 → 14300**：本机 Windows 排除端口段 1353–1452（Hyper-V/WinNAT 保留）包含 1430 → EACCES。dev.ps1/dev.sh/tauri.conf.json 同步改。
+2. **锁纪律（重大修复）**：形态版一度整窗未响应——根因：hook/watchdog 后台线程持 AppState 锁调用 Win32（SetWindowPos/SetWindowRgn）或 tauri API（emit/get_webview_window），向主线程 SendMessage；主线程在事件监听器（update-regions）等同一把锁 → 互相等待。修复：
+   - 锁内零 Win32/零 tauri 调用；窗口操作收集为 `WinOp` 列表锁外执行；edit-end 等 emit 延后到锁外
+   - 窗口 hwnd 缓存（usize）供 hook 线程锁内只读比较；前台/全屏逻辑不再锁内调 tauri
+   - **watchdog 线程整体移除**：拓扑检测改由 WinEvent hook 的 EVENT_DISPLAYCHANGE 触发，z-order 回压由前台切换 hook 负责
+   - `lock.rs`：AppLock（持锁线程名 + 时长 + 调用栈记录）+ lock-monitor 线程（持锁超 10s 告警，曾成功定位 watchdog/hook 卡死点）
+3. **拖拽结束改用同步 invoke `drag_end`**（事件改命令）：先落坐标再执行后续动作（store/stack/merge），顺序有保证。
+4. **FLIP 动画节流**：WebView2 在重负载下 WAAPI 动画被节流到 ~1/4 速，卡在半途的 transform 会破坏命中测试（点击落空）。修复：动画超时强制 finish（`flip.ts finishAfter`）+ pointerdown 时取消残留动画；测试侧等待动画结算后再断言。
+5. **`take` bump updated_at**：拖出 = 隐含确认 + 重置自动收回时钟（否则快进后取回的便签会被下一轮定时器立即收回）。
+6. **undoBatch 经 `args.__batch` 传批次**（前端便捷包装）；smoke 用 `actRaw` 显式传 batch。
+7. **重建窗口锁外执行**：`rebuild_windows` 为纯窗口操作（不持锁），WebView2 创建可能阻塞，锁内创建会饿死全部命令。
+8. **编辑中卡片不重渲染**：card-focus 的状态事件会重建编辑卡（丢 .editing 与焦点），与拖拽卡同规则 skip。
+9. 种子数据含 40 天旧便签（启动 3s 自动收回 → 未确认演示）、叠放 3 张、合并容器、档案格 3 张、定时/紧急便签。
+
+### 13.4 待验证清单（移交 M5/体感验收）
+
+- [ ] 多显示器实机：边栏仅主屏观感、跨屏拖出（本机双屏代码就绪，CDP 冒烟覆盖了单屏主链路）
+- [ ] 边栏独立窗口激活/回压体验、hover 抽屉/钉住阅读体验
+- [ ] 刷卡 50% 判定 + dock/portal 角落（窄屏 1366）
+- [ ] 时间线崩塌 80px 阈值手感；视图抬升/遮罩真实观感（闪现兜底判定）
+- [ ] 档案格容量算法手感（320px/平铺 vs 堆叠/±1 迟滞）
+- [ ] 全屏时边栏一并隐藏是否可接受
+- [ ] 合并上限 4 体感；方向语义（AI 移动）落点合理性

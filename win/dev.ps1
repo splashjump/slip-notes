@@ -11,10 +11,10 @@ Get-CimInstance Win32_Process -Filter "Name = 'win.exe'" -ErrorAction SilentlyCo
         Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
     }
 
-Write-Host "== 停止 1430 端口监听者（vite；按 PID 杀，绝不全杀 node）=="
-Get-NetTCPConnection -LocalPort 1430 -State Listen -ErrorAction SilentlyContinue |
+Write-Host "== 停止 14300 端口监听者（vite；按 PID 杀，绝不全杀 node）=="
+Get-NetTCPConnection -LocalPort 14300 -State Listen -ErrorAction SilentlyContinue |
     ForEach-Object {
-        Write-Host "  停止 1430 端口进程 (PID $($_.OwningProcess))"
+        Write-Host "  停止 14300 端口进程 (PID $($_.OwningProcess))"
         Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue
     }
 
@@ -31,8 +31,10 @@ if (-not [bool](Get-Command cargo -ErrorAction SilentlyContinue)) {
     }
 }
 
-Write-Host "== 启动 tauri dev =="
+Write-Host "== 启动 tauri dev（CDP 9222 开启，供 T1/T3 测试）=="
 $log = Join-Path $env:TEMP 'tauri_dev.log'
+# M0 CDP 基建：WebView2 调试端口 9222（tests/cdp.mjs 连接用）
+$env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = '--remote-debugging-port=9222'
 # cmd 包装：npx 是 .cmd 脚本，Start-Process 直接调 npx 不可靠；stdout/stderr 合并进单一日志
 $proc = Start-Process -FilePath 'cmd.exe' -ArgumentList '/c', "npx tauri dev > `"$log`" 2>&1" `
     -WorkingDirectory $PSScriptRoot -WindowStyle Hidden -PassThru
@@ -44,4 +46,4 @@ Write-Host "查看: Get-Content -Wait $log    （或 tail -f，如果你有 git 
 Write-Host ""
 Write-Host "手动停止（下次重启前不必手动停，本脚本会自动清理）："
 Write-Host "  taskkill /F /IM win.exe"
-Write-Host "  Stop-Process -Id (Get-NetTCPConnection -LocalPort 1430 -State Listen).OwningProcess -Force"
+Write-Host "  Stop-Process -Id (Get-NetTCPConnection -LocalPort 14300 -State Listen).OwningProcess -Force"

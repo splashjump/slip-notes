@@ -7,8 +7,8 @@ export PATH="/c/Users/admin/.cargo/bin:$PATH"
 echo "== 清理旧 win.exe =="
 taskkill //F //IM win.exe 2>/dev/null || echo "  (无 win.exe)"
 
-echo "== 清理 1430 端口监听者 =="
-powershell -Command "Get-NetTCPConnection -LocalPort 1430 -State Listen -ErrorAction SilentlyContinue | ForEach-Object { Stop-Process -Id \$_.OwningProcess -Force -ErrorAction SilentlyContinue; Write-Output ('  killed ' + \$_.OwningProcess) }" 2>/dev/null || true
+echo "== 清理 14300 端口监听者 =="
+powershell -Command "Get-NetTCPConnection -LocalPort 14300 -State Listen -ErrorAction SilentlyContinue | ForEach-Object { Stop-Process -Id \$_.OwningProcess -Force -ErrorAction SilentlyContinue; Write-Output ('  killed ' + \$_.OwningProcess) }" 2>/dev/null || true
 
 sleep 2
 
