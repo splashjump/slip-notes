@@ -1,7 +1,7 @@
 ﻿# win/dev.ps1 — slip 画布 spike 开发重启脚本（PowerShell）
 # 用法（在 win/ 目录）：.\dev.ps1        （pwsh7 / Windows PowerShell 5.1 通用）
 # 功能：精准清理旧进程（绝不误杀 node/pi）→ 启动 tauri dev（后台）→ 日志落 %TEMP%
-# 停止 slip：taskkill /F /IM win.exe；或见脚本内"手动停止"注释
+# 停止 slip：.\stop.ps1（同目录，停止 win.exe + tauri dev 包装进程 + vite 14300）
 
 Write-Host "== 停止旧 win.exe（只杀本项目编译产物）=="
 Get-CimInstance Win32_Process -Filter "Name = 'win.exe'" -ErrorAction SilentlyContinue |
@@ -44,6 +44,5 @@ Write-Host "已启动（包装进程 PID=$($proc.Id)，实际 tauri/cargo 子进
 Write-Host "日志: $log"
 Write-Host "查看: Get-Content -Wait $log    （或 tail -f，如果你有 git bash）"
 Write-Host ""
-Write-Host "手动停止（下次重启前不必手动停，本脚本会自动清理）："
-Write-Host "  taskkill /F /IM win.exe"
-Write-Host "  Stop-Process -Id (Get-NetTCPConnection -LocalPort 14300 -State Listen).OwningProcess -Force"
+Write-Host "停止（下次重启前不必手动停，本脚本会自动清理）："
+Write-Host "  .\stop.ps1"
