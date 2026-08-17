@@ -295,3 +295,41 @@ ephemeral（Rust 侧，不持久化，影响数据行为的 UI 态）：
 - reviewer 复审：1🔴（展开/收起 toggle 回归，已修+冒烟覆盖）+2🟡（unmerge 幽灵残留 pressedId 前置；stackOff 补偿语义错误——叠放路径位置由 stack 动作覆盖，减法纯负资产，已删除）已修；🟢：closingView 被无关 state 事件截断（保持到 timer 收尾）、陈旧 view-anim-done/defer_lower 压回新视图（Rust 检查 view.is_none）、focus-note 竞态、450ms 兜底跨轮误伤（捕获拖拽 id）、T1d 慢机合并阈值 flake（6 步）、portal 带高 96vs98（padding 19px）、set_merge_dir 单测、冒烟补展开/收起断言——全部修复
 - 验证：Rust 单测 14/14 · tsc 零错误 · cargo check 零警告 · CDP 冒烟（新增叠放置顶/展开收起断言）连续 5 轮全绿
 - 视觉验证：CDP 截图 + vision 模型评审（纸堆厚度/×3 角标/胶带/传送门光环/时间线遮罩均确认）
+
+## 15. Q31 重构：废除 SetWindowRgn，改 WM_NCHITTEST 命中穿透（2026-08-17）
+
+> 背景：用户实测 5 类显示问题（拖动瞬移/拖出晚现/便签消失缺块/胶带被裁/落定闪跳）全部根源于 Rgn 与 DOM 异步同步的固有不同步。决策记录见 GRILL-PLAN Q31；否决项见 GRILL-PLAN §15。
+
+### 15.1 机制
+
+- **显示层永不裁剪**：窗口全屏透明，不再 SetWindowRgn。纸胶带/阴影/动画溢出全部完整合成（「被窗口切掉」结构性消失）；Rgn 与 DOM 不同步导致消失/缺块的问题不再可能发生。
+- **命中 = WM_NCHITTEST**：顶层窗口子类化（SetWindowLongPtrW → slip_wndproc），命中矩形内返回 HTCLIENT（系统再询问 WebView2 子窗口 → 正常收点击），空白处返回 HTTRANSPARENT（消息落到桌面）。命中矩形 = 前端 update-regions 上报（屏幕物理坐标：outerPosition + scaleFactor 换算，origin+dpr 方案已废）。
+- **视图全屏**：raise_for_view 把命中缓存置为该显示器全屏矩形（遮罩拦截点击关闭）；关闭后前端重报恢复。
+- **坐标单位统一**：命中矩形与 NCHITTEST lParam 同为屏幕物理像素。前端不再传 CSS 矩形容器 × dpr（实测窗口存在额外缩放，devicePixelRatio 与窗口实际比例不一致会导致偏移）。
+
+### 15.2 保底（Q31）
+
+- 侧栏快捷栏/工具栏新增 🕳「收起全部」按钮 → act("dismiss") → 隐藏全部画布+边栏窗口；
+- 任务栏托盘图标（Shell_NotifyIconW 注册到 main 窗口，回调 TRAY_MSG → slip_wndproc）→ 点击恢复全部窗口 + 置底；
+- 不做自动安全阀（Q31 用户拍板，手动保底足够）。
+
+### 15.3 重构中发现并修复的真实 bug
+
+1. **hwnds 从未记录（重要）**：AppState::new 建窗时 state 尚未 manage → record_win 的 try_state 失败 → hwnds 空 → hook 的 fg_is_self 失效 → 编辑激活可能被误判全屏隐藏（用户反馈「便签彻底隐藏」疑似来源之一）。修复：setup 在 manage 后统一 record_all_windows。
+2. **hide 窗口需走 tauri API**：裸 ShowWindow(SW_HIDE) 只隐藏 tao 包装窗口，WebView2 渲染窗口（Chrome_RenderWidgetHostHWND，msedgewebview2 进程的独立顶层窗口）仍残留屏幕（收起后 WindowFromPoint 仍命中）！→ hide_win/show_win_noactivate 改用 win.hide()/win.show()，由 tauri/tao 统一管理 WebView 子树。
+3. **dismiss 走 action 而非事件**：tauri dev 下前端 emit 事件可能被 capability 静默丢弃（无错误日志）→ 收起走 action("dismiss")（与手势同构，测试可靠）。
+
+### 15.4 验证
+
+- Rust 单测 14/14 · cargo check 零警告 · tsc 零错误
+- **tests/nchittest-check.mjs**（OS 层，PowerShell SendMessage WM_NCHITTEST + per-monitor DPI aware）：卡片中心 HTCLIENT(1)、空白/窗外 HTTRANSPARENT(-1) ✅
+- **tests/real-cursor-check.mjs**（真实光标 WindowFromPoint）：卡片处 = msedgewebview2（可点击）、空白处 = 无窗口（穿透）✅
+- 真实右键空白：前台变成下层软件（VS Code）而非 win → 不挡桌面 ✅
+- 收起→隐藏（IsWindowVisible false）→ 托盘点击恢复 ✅
+- CDP 冒烟 32 项全绿（叠加 Q31 段：dismiss action 往返）
+
+### 15.5 遗留（待实机/人工）
+
+- 托盘图标当真机上点击恢复（自动化已模拟 TRAY_MSG 全链路）；
+- 双机/多屏 DPI 不同缩放下的命中精度（scaleFactor 方案理论上正确，实机复验）；
+- 拖动链路（drag-layer）在 NCHITTEST 下的手感（无 Rgn 间隙后理论更稳，实机体验）。

@@ -1088,13 +1088,22 @@ function dismissChips() {
 // ---------------------------------------------------------------------------
 
 function reportRegions(delay = 0) {
-  setTimeout(() => {
+  setTimeout(async () => {
     if (viewOpen() || closingView || !st) return; // 视图期间 Rust 已设全屏 Rgn
+    // Q31：上报屏幕物理坐标（不再依赖 devicePixelRatio 猜测换算——DPR 与窗口实际
+    // 缩放可能不一致导致命中偏移；用 Tauri scaleFactor = 物理px/CSSpx 官方比例）
+    const scale = win.scaleFactor ? await win.scaleFactor() : window.devicePixelRatio || 1;
     const rects: { x: number; y: number; w: number; h: number }[] = [];
     canvasEl.querySelectorAll<HTMLElement>(".note-card, .portal, .chips").forEach((el) => {
       if (el.classList.contains("view-card")) return;
       const r = el.getBoundingClientRect();
-      if (r.width > 0 && r.height > 0) rects.push({ x: r.left, y: r.top, w: r.width, h: r.height });
+      if (r.width > 0 && r.height > 0)
+        rects.push({
+          x: winPhys.x + r.left * scale,
+          y: winPhys.y + r.top * scale,
+          w: r.width * scale,
+          h: r.height * scale,
+        });
     });
     void emit("update-regions", { label, rects });
   }, delay);

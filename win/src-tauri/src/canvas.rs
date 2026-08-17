@@ -1,9 +1,14 @@
-//! 窗口管理器（形态先行版，FORM-PLAN §4）
+//! 窗口管理器（Q31 重构版，FORM-PLAN §4/§15）
 //!
 //! 窗口结构：主屏 = 边栏窗口(sidebar) + 画布窗口(canvas-i)；副屏 = 画布窗口；
 //! 全局 = 拖拽层窗口(drag-layer)；控制台 = main（普通窗口）。
-//! 窗口常态 = 全屏透明（画布）/ 边栏矩形（sidebar），Rgn 控制穿透。
-//! 视图打开：画布窗口抬升到顶（SWP_NOACTIVATE）+ Rgn 全屏 + 窗口内遮罩（前端）。
+//! 窗口常态 = 全屏透明（画布）/ 边栏矩形（sidebar），**不再 SetWindowRgn**——
+//! 显示层永不裁剪（Q31：Rgn 与 DOM 异步同步必然产生消失/缺块/被裁 bug）。
+//! 穿透改为 WM_NCHITTEST 命中判定：顶层窗口子类化，命中矩形内返回 HTCLIENT
+//! （系统再询问 WebView2 子窗口 → 正常收点击），空白处返回 HTTRANSPARENT
+//! （消息落到桌面/下层窗口）。命中矩形由前端 update-regions 上报（语义 = 旧 Rgn）。
+//! 视图打开：画布窗口抬升到顶（SWP_NOACTIVATE）+ 命中全屏 + 窗口内遮罩（前端）。
+//! 保底（Q31）：dismiss-all 事件隐藏全部窗口 + 任务栏托盘图标恢复；无自动安全阀。
 //!
 //! ⚠️ 锁纪律（重要）：AppState 锁内只做数据操作；任何 Win32 窗口调用
 //! （SetWindowPos / ShowWindow / SetWindowRgn）必须离开锁执行——
@@ -19,23 +24,89 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 use windows::Win32::Foundation::{HWND, LPARAM, RECT};
 use windows::Win32::Graphics::Gdi::{
-    CombineRgn, CreateRectRgn, DeleteObject, EnumDisplayMonitors, GetMonitorInfoW, HDC,
-    HGDIOBJ, HMONITOR, HRGN, MONITORINFOEXW, SetWindowRgn, RGN_OR,
+    EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFOEXW,
 };
 use windows::Win32::UI::Accessibility::{SetWinEventHook, UnhookWinEvent, HWINEVENTHOOK};
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, GetDpiForWindow, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::WindowsAndMessaging::{
-    DispatchMessageW, GetClassNameW, GetForegroundWindow, GetMessageW, GetWindowLongPtrW,
-    GetWindowRect, SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage,
+    CallWindowProcW, DispatchMessageW, GetClassNameW,
+    GetForegroundWindow, GetMessageW, GetWindowLongPtrW, GetWindowRect,
+    LoadIconW, SetWindowLongPtrW, SetWindowPos, TranslateMessage,
     EVENT_OBJECT_LOCATIONCHANGE, EVENT_SYSTEM_FOREGROUND, GWL_EXSTYLE, GWL_STYLE,
-    HWND_BOTTOM, HWND_TOP, MSG, SET_WINDOW_POS_FLAGS, SW_HIDE, SW_SHOWNOACTIVATE,
-    SWP_NOACTIVATE, SWP_NOZORDER, SWP_NOMOVE, SWP_NOSIZE, WINEVENT_OUTOFCONTEXT,
-    MONITORINFOF_PRIMARY, WS_CAPTION, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    GWLP_WNDPROC, HTCLIENT, HTTRANSPARENT, HWND_BOTTOM, HWND_TOP, IDI_APPLICATION,
+    MSG, SET_WINDOW_POS_FLAGS, SWP_NOACTIVATE, SWP_NOZORDER,
+    SWP_NOMOVE, SWP_NOSIZE, WINEVENT_OUTOFCONTEXT, WM_APP, WM_LBUTTONUP,
+    WM_NCHITTEST, MONITORINFOF_PRIMARY, HICON,
+    WS_CAPTION, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
 };
+use windows::Win32::UI::Shell::{
+    NIM_ADD, NIF_ICON, NIF_MESSAGE, NIF_TIP, NOTIFYICONDATAW, Shell_NotifyIconW,
+};
+use windows::Win32::Foundation::{LRESULT, WPARAM};
 
 use crate::action;
 use crate::lock::{register_thread_name, AppLock};
 use crate::store::Store;
+
+/// WM_NCHITTEST 命中判定回调（Q31）：窗口子类化 WndProc。
+/// ⚠️ 锁纪律：回调内锁内只读命中矩形（无任何 Win32 调用），其余转发旧 WndProc。
+unsafe extern "system" fn slip_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    // 托盘回调（Q31 保底：点托盘图标恢复全部窗口）
+    if msg == TRAY_MSG {
+        if lparam.0 == WM_LBUTTONUP as isize {
+            if let Some(app) = WND_APP.get().and_then(|m| m.lock().ok().and_then(|g| g.clone())) {
+                restore_dismissed(&app);
+            }
+        }
+        return LRESULT(0);
+    }
+    if msg == WM_NCHITTEST {
+        // lParam 低 16 位 = 屏幕 x，高 16 位 = 屏幕 y（物理像素）
+        let sx = (lparam.0 & 0xFFFF) as i16 as i32;
+        let sy = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
+        let hit = hit_test(hwnd, sx as f64, sy as f64);
+        return LRESULT(if hit { HTCLIENT as isize } else { HTTRANSPARENT as isize });
+    }
+    let old = OLD_WNDPROCS
+        .lock()
+        .ok()
+        .and_then(|m| m.get(&(hwnd.0 as usize)).copied())
+        .unwrap_or(0);
+    // isize → fn 指针（非 Option 转换；保留调用约定，再包 Some）
+    let proc: unsafe extern "system" fn(HWND, u32, WPARAM, LPARAM) -> LRESULT =
+        unsafe { std::mem::transmute::<isize, unsafe extern "system" fn(HWND, u32, WPARAM, LPARAM) -> LRESULT>(old) };
+    CallWindowProcW(Some(proc), hwnd, msg, wparam, lparam)
+}
+
+/// 命中判定（锁内只读）：当前窗口命中矩形（屏幕物理像素）是否包含该屏幕坐标点。
+/// 命中矩形 = 前端上报 CSS 矩形 × dpr + 窗口屏幕原点（handle_update_regions 换算）。
+/// 视图打开时由 Rust 置为全屏（handle_view_open）；关闭后前端重报恢复。
+fn hit_test(hwnd: HWND, sx: f64, sy: f64) -> bool {
+    let Some(app) = WND_APP.get().and_then(|m| m.lock().ok().and_then(|g| g.clone())) else {
+        return true; // 未就绪：默认可点（视图未初始化，安全兜底）
+    };
+    let Some(state) = app.try_state::<Arc<AppLock>>() else {
+        return true;
+    };
+    let rects = {
+        let g = state.lock();
+        let label = g
+            .hwnds
+            .iter()
+            .find(|(_, h)| **h == hwnd.0 as usize)
+            .map(|(l, _)| l.clone());
+        let Some(label) = label else { return true };
+        g.hit_rects.get(&label).cloned().unwrap_or_default()
+    };
+    rects.iter().any(|(x, y, w, h)| sx >= *x && sy >= *y && sx < x + w && sy < y + h)
+}
+
+/// 旧 WndProc 注册表（hwnd → 旧 WndProc 指针）
+static OLD_WNDPROCS: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<usize, isize>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+/// WndProc 回调用 AppHandle（同 HOOK_APP 模式）
+static WND_APP: std::sync::OnceLock<std::sync::Mutex<Option<AppHandle>>> = std::sync::OnceLock::new();
 
 // ---------------------------------------------------------------------------
 // 数据结构
@@ -76,7 +147,12 @@ pub struct AppState {
     pub fullscreen_hidden: Vec<bool>,
     pub canvas_dpr: HashMap<String, f64>,
     /// 窗口 hwnd 缓存（usize；创建时记录；hook 线程锁内只读，避免锁内调 tauri API）
+    /// （也经 state 广播，供 Q31 验收脚本定位窗口）
     pub hwnds: HashMap<String, usize>,
+    /// 命中矩形（屏幕物理像素；Q31：update-regions 前端上报，供 WM_NCHITTEST 判定）
+    pub hit_rects: HashMap<String, Vec<(f64, f64, f64, f64)>>,
+    /// 收起态（Q31 保底：dismiss-all 隐藏全部窗口后为 true；托盘点击恢复）
+    pub dismissed: bool,
     pub drag_layer_ready: bool,
     pub drag_layer_shown: bool,
     pub drag_layer_dpr: Option<f64>,
@@ -96,7 +172,6 @@ pub(crate) enum WinOp {
     Hide(String),
     Show(String),
     RaiseTop(String),
-    Region(String, f64, Vec<(f64, f64, f64, f64)>), // label, dpr, rects
 }
 
 fn exec_win_ops(app: &AppHandle, ops: Vec<WinOp>) {
@@ -124,11 +199,6 @@ fn exec_win_ops(app: &AppHandle, ops: Vec<WinOp>) {
                     }
                 }
             }
-            WinOp::Region(l, dpr, rects) => {
-                if let Some(w) = app.get_webview_window(&l) {
-                    apply_region(&w, &rects, dpr);
-                }
-            }
         }
     }
 }
@@ -142,6 +212,8 @@ const AUTO_ARCHIVE_INTERVAL: Duration = Duration::from_secs(30);
 const HOOK_EVENT_FG: u32 = EVENT_SYSTEM_FOREGROUND;
 const HOOK_EVENT_LOC: u32 = EVENT_OBJECT_LOCATIONCHANGE;
 const HOOK_EVENT_DISPLAYCHANGE: u32 = 0x8010; // EVENT_DISPLAYCHANGE
+/// 托盘回调消息（WM_APP + 1；注册到 main 窗口）
+const TRAY_MSG: u32 = WM_APP + 1;
 
 // ---------------------------------------------------------------------------
 // 窗口创建 / 销毁
@@ -181,17 +253,52 @@ fn create_canvas_window(app: &AppHandle, label: &str, rect: &RECT) -> tauri::Res
     let _ = win.set_position(tauri::PhysicalPosition::new(rect.left, rect.top));
     let _ = win.set_size(tauri::PhysicalSize::new(w as u32, h as u32));
     apply_desk_style(&win);
-    apply_region(&win, &[], 1.0);
-    record_hwnd(app, label, &win);
+    record_win(app, label, &win);
     Ok(())
 }
 
-fn record_hwnd(app: &AppHandle, label: &str, win: &tauri::WebviewWindow) {
+/// 记录窗口 hwnd + 子类化（WM_NCHITTEST 命中穿透；管理期未到位时由 record_all_windows 补）
+fn record_win(app: &AppHandle, label: &str, win: &tauri::WebviewWindow) {
     if let Some(state) = app.try_state::<Arc<AppLock>>() {
-        if let Ok(h) = win.hwnd() {
+        let hwnd = win.hwnd().ok().map(|h| h.0 as usize);
+        if let Some(hwnd) = hwnd {
             let mut g = state.lock();
-            g.hwnds.insert(label.to_string(), h.0 as usize);
+            g.hwnds.insert(label.to_string(), hwnd);
+            drop(g);
+            // 锁外：子类化（SetWindowLongPtrW 是 Win32 调用）
+            subclass_window(win);
         }
+    }
+}
+
+/// 窗口子类化：替换 WndProc 为 slip_wndproc（Q31 命中穿透）。
+/// 保存旧 WndProc 到 OLD_WNDPROCS（WM_NCHITTEST 外的消息转发给旧 proc）。
+fn subclass_window(win: &tauri::WebviewWindow) {
+    let Ok(hwnd) = win.hwnd() else { return };
+    unsafe {
+        let old = GetWindowLongPtrW(hwnd, GWLP_WNDPROC);
+        if let Ok(mut m) = OLD_WNDPROCS.lock() {
+            m.insert(hwnd.0 as usize, old);
+        }
+        SetWindowLongPtrW(hwnd, GWLP_WNDPROC, slip_wndproc as *const () as isize);
+    }
+}
+
+/// manage 后补记录所有窗口（Q31：AppState::new 建窗时 state 未 manage，见 setup）
+fn record_all_windows(app: &AppHandle) {
+    let Some(state) = app.try_state::<Arc<AppLock>>() else { return };
+    let monitors = {
+        let g = state.lock();
+        g.monitors.clone()
+    };
+    for (i, _m) in monitors.iter().enumerate() {
+        let label = canvas_label(i);
+        if let Some(w) = app.get_webview_window(&label) {
+            record_win(app, &label, &w);
+        }
+    }
+    if let Some(w) = app.get_webview_window("sidebar") {
+        record_win(app, "sidebar", &w);
     }
 }
 
@@ -217,8 +324,7 @@ fn create_sidebar_window(app: &AppHandle, m: &MonitorSlot) -> tauri::Result<()> 
     let _ = win.set_position(tauri::PhysicalPosition::new(x as i32, y as i32));
     let _ = win.set_size(tauri::PhysicalSize::new(w as u32, h as u32));
     apply_desk_style(&win);
-    apply_region(&win, &[], 1.0);
-    record_hwnd(app, "sidebar", &win);
+    record_win(app, "sidebar", &win);
     Ok(())
 }
 
@@ -238,6 +344,88 @@ fn remove_noactivate(win: &tauri::WebviewWindow) {
             SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex & !(WS_EX_NOACTIVATE.0 as isize));
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// 托盘图标（Q31 保底：dismiss-all 隐藏全部窗口后，点托盘恢复）
+// ---------------------------------------------------------------------------
+
+/// 注册托盘图标到 main 窗口（回调消息 TRAY_MSG → slip_wndproc 处理）
+fn init_tray(app: &AppHandle) {
+    let Some(win) = app.get_webview_window("main") else { return };
+    let Ok(hwnd) = win.hwnd() else { return };
+    log::info!("[slip] 托盘注册目标 main hwnd=0x{:x}", hwnd.0 as usize);
+    // 登记进 hwnds（诊断/测试定位）
+    if let Some(state) = app.try_state::<Arc<AppLock>>() {
+        let mut g = state.lock();
+        g.hwnds.insert("main".into(), hwnd.0 as usize);
+    }
+    subclass_window(&win);
+    unsafe {
+        let mut nid: NOTIFYICONDATAW = std::mem::zeroed();
+        nid.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
+        nid.hWnd = hwnd;
+        nid.uID = 1;
+        nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
+        nid.uCallbackMessage = TRAY_MSG;
+        nid.hIcon = LoadIconW(None, IDI_APPLICATION).unwrap_or(HICON::default());
+        let tip: Vec<u16> = "纸筏 slip — 点击恢复便签墙\0".encode_utf16().collect();
+        for (i, c) in tip.iter().copied().take(127).enumerate() {
+            nid.szTip[i] = c;
+        }
+        let _ = Shell_NotifyIconW(NIM_ADD, &nid);
+    }
+    log::info!("[slip] 托盘图标已注册");
+}
+
+/// 收起全部（Q31 保底）：隐藏所有画布 + 边栏窗口（拖拽层本就隐藏；main 控制台保留）
+/// ⚠️ 锁外 Win32：锁内只收集 labels 列表。
+pub fn handle_dismiss(app: &AppHandle) {
+    let Some(state) = app.try_state::<Arc<AppLock>>() else { return };
+    let labels: Vec<String> = {
+        let mut g = state.lock();
+        if g.dismissed {
+            return;
+        }
+        g.dismissed = true;
+        let mut ls: Vec<String> = (0..g.monitors.len()).map(canvas_label).collect();
+        ls.push("sidebar".into());
+        ls.push("drag-layer".into());
+        ls
+    };
+    exec_win_ops(app, labels.into_iter().map(WinOp::Hide).collect());
+    log::info!("[slip] 收起全部窗口（托盘可恢复）");
+}
+
+/// 恢复全部（Q31 保底：托盘点击 / 前端按钮）：显示全部窗口 + 置底
+fn restore_dismissed(app: &AppHandle) {
+    let Some(state) = app.try_state::<Arc<AppLock>>() else { return };
+    let labels: Vec<String> = {
+        let mut g = state.lock();
+        if !g.dismissed {
+            return;
+        }
+        g.dismissed = false;
+        let mut ls: Vec<String> = (0..g.monitors.len()).map(canvas_label).collect();
+        ls.push("sidebar".into());
+        ls
+    };
+    let mut ops: Vec<WinOp> = Vec::new();
+    for l in &labels {
+        ops.push(WinOp::Show(l.clone()));
+        ops.push(WinOp::PushBottom(l.clone()));
+    }
+    exec_win_ops(app, ops);
+    // 恢复后视图状态：重新执行一次 region 上报（前端 UI 不动，仅命中缓存可能已过期）
+    // —— 视图打开时命中全屏，若收起时正开视图，恢复后由前端 view-anim-done 或重报恢复。
+    if let Some(s) = app.try_state::<Arc<AppLock>>() {
+        let payload = {
+            let g = s.lock();
+            state_payload_inner(&g)
+        };
+        let _ = app.emit("state", payload);
+    }
+    log::info!("[slip] 恢复全部窗口");
 }
 
 // ---------------------------------------------------------------------------
@@ -300,39 +488,10 @@ fn virtual_bounds(monitors: &[MonitorSlot]) -> RECT {
 }
 
 // ---------------------------------------------------------------------------
-// 区域穿透：SetWindowRgn（⚠️ 必须在锁外调用）
+// Q31 注：区域穿透不再用 SetWindowRgn（显示层永不裁剪），改由 WM_NCHITTEST
+// 命中判定（slip_wndproc / hit_test）。前端 update-regions 上报的矩形用于
+// 更新命中缓存（handle_update_regions），不再设置窗口区域。
 // ---------------------------------------------------------------------------
-
-fn apply_region(win: &tauri::WebviewWindow, rects: &[(f64, f64, f64, f64)], dpr: f64) {
-    let hwnd = match win.hwnd() {
-        Ok(h) => h,
-        Err(_) => return,
-    };
-    unsafe {
-        if rects.is_empty() {
-            let empty = CreateRectRgn(0, 0, 0, 0);
-            let _ = SetWindowRgn(hwnd, Some(empty), true);
-            return;
-        }
-        let mut combined: HRGN = HRGN(std::ptr::null_mut());
-        for (x, y, w, h) in rects {
-            let (l, t, r, b) = (
-                (x * dpr).round() as i32,
-                (y * dpr).round() as i32,
-                ((x + w) * dpr).round() as i32,
-                ((y + h) * dpr).round() as i32,
-            );
-            let one = CreateRectRgn(l, t, r, b);
-            if combined.0.is_null() {
-                combined = one;
-            } else {
-                let _ = CombineRgn(Some(combined), Some(combined), Some(one), RGN_OR);
-                let _ = DeleteObject(HGDIOBJ(one.0));
-            }
-        }
-        let _ = SetWindowRgn(hwnd, Some(combined), true);
-    }
-}
 
 // ---------------------------------------------------------------------------
 // z-order 管理（⚠️ 必须在锁外调用）
@@ -376,10 +535,25 @@ pub fn raise_for_view(app: &AppHandle, label: &str) {
     let _ = w.set_always_on_bottom(false);
     remove_noactivate(&w);
     exec_win_ops(app, vec![WinOp::RaiseTop(label.to_string())]);
-    // Rgn = 全屏（SetWindowRgn(None) 恢复整窗）
-    if let Ok(hwnd) = w.hwnd() {
-        unsafe {
-            let _ = SetWindowRgn(hwnd, None, true);
+    // Q31：view 打开 → 命中缓存置为该窗口所在显示器全屏矩形
+    // （前端遮罩 div 铺满窗口，NCHITTEST 全命中 → 遮罩拦截点击关闭视图）
+    if let Some(state) = app.try_state::<Arc<AppLock>>() {
+        let rect = {
+            let g = state.lock();
+            let mon_idx = label
+                .strip_prefix("canvas-")
+                .and_then(|s| s.parse::<usize>().ok())
+                .unwrap_or(g.primary);
+            g.monitors.get(mon_idx).map(|m| m.rect)
+        };
+        if let Some(r) = rect {
+            let mut g = state.lock();
+            g.hit_rects.insert(label.to_string(), vec![(
+                r.left as f64,
+                r.top as f64,
+                (r.right - r.left) as f64,
+                (r.bottom - r.top) as f64,
+            )]);
         }
     }
 }
@@ -447,20 +621,16 @@ pub fn lower_after_view(app: &AppHandle, label: &str) {
     push_bottom(&w);
 }
 
+/// 隐藏窗口。⚠️ 必须用 tauri 的 hide() 而非裸 ShowWindow(SW_HIDE)：
+/// WebView2 的渲染窗口（Chrome_RenderWidgetHostHWND，msedgewebview2 进程的独立
+/// 顶层窗口）跟随宿主可见性由 tauri/tao 管理，裸 ShowWindow 只隐藏 tao 包装窗口，
+/// 渲染窗口仍残留屏幕（Q31 实机发现：收起后 WindowFromPoint 仍命中渲染窗口）。
 pub fn hide_win(win: &tauri::WebviewWindow) {
-    if let Ok(hwnd) = win.hwnd() {
-        unsafe {
-            let _ = ShowWindow(hwnd, SW_HIDE);
-        }
-    }
+    let _ = win.hide();
 }
 
 pub fn show_win_noactivate(win: &tauri::WebviewWindow) {
-    if let Ok(hwnd) = win.hwnd() {
-        unsafe {
-            let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
-        }
-    }
+    let _ = win.show();
 }
 
 // ---------------------------------------------------------------------------
@@ -554,6 +724,8 @@ fn state_payload_inner(g: &AppState) -> serde_json::Value {
         "editing": g.editing,
         "fullscreenHidden": g.fullscreen_hidden,
         "sidebarCollapsed": g.sidebar_collapsed,
+        // Q31 验收钩子：hwnd 表（测试脚本定位窗口用；正式产品不依赖）
+        "hwnds": g.hwnds,
         "sidebarRect": g.sidebar_rect,
         "timeOffset": g.store.time_offset,
         "journal": g.store.journal_meta(30),
@@ -590,6 +762,8 @@ impl AppState {
             fullscreen_hidden: Vec::new(), // 在窗口创建后按屏数初始化（见下方）
             canvas_dpr: Default::default(),
             hwnds: Default::default(),
+            hit_rects: Default::default(),
+            dismissed: false,
             drag_layer_ready: false,
             drag_layer_shown: false,
             drag_layer_dpr: None,
@@ -718,12 +892,14 @@ impl AppState {
             }
         }
         let now_hidden = self.fullscreen_hidden.iter().any(|b| *b);
+        // Q31：dismissed（手动收起）时全屏退出不得自动恢复（托盘/显式恢复才行）
+        let suppressed = self.dismissed;
         if !was_hidden && now_hidden {
             // 进入全屏：全部窗口隐藏（只此一处，避免重复 Hide）
             for label in &all_labels {
                 ops.push(WinOp::Hide(label.clone()));
             }
-        } else if was_hidden && !now_hidden {
+        } else if was_hidden && !now_hidden && !suppressed {
             // 全部屏退出全屏：恢复窗口 + 回压置底
             for label in &all_labels {
                 ops.push(WinOp::Show(label.clone()));
@@ -989,11 +1165,17 @@ fn handle_topology_change(app: &AppHandle) {
 /// 初始化入口（在 tauri setup 里调用）
 pub fn setup(app: &AppHandle) {
     register_thread_name("main-thread"); // G3：主线程注册诊断名
+    let _ = WND_APP.get_or_init(|| std::sync::Mutex::new(Some(app.clone())));
     let state = Arc::new(AppLock::new(AppState::new(app)));
     state.start_monitor();
     app.manage(state);
+    // Q31 修复（真实 bug）：AppState::new 建窗时 state 未 manage → record_win 的
+    // try_state 失败 → hwnds 从未记录 → hook 的 fg_is_self 失效（编辑激活被误判
+    // 全屏隐藏，用户反馈的「便签彻底隐藏」疑似来源之一）。manage 后统一补记录。
+    record_all_windows(app);
     install_hook(app);
     start_auto_archive(app.clone());
+    init_tray(app);
     if let Some(s) = app.try_state::<Arc<AppLock>>() {
         let fg = unsafe { GetForegroundWindow() };
         let fulls = {
@@ -1102,15 +1284,14 @@ pub fn handle_drag_layer_ready(app: &AppHandle, p: DragLayerReadyPayload) {
 }
 
 pub fn handle_update_regions(app: &AppHandle, p: UpdateRegionsPayload) {
+    // Q31：不再 SetWindowRgn。前端已上报屏幕物理坐标（outerPosition + scaleFactor 换算），
+    // 直接存 hit_rects 供 WM_NCHITTEST（lParam = 屏幕物理坐标）判定。
     let Some(state) = app.try_state::<Arc<AppLock>>() else {
         return;
     };
-    let dpr = {
-        let g = state.lock();
-        g.canvas_dpr.get(&p.label).copied().unwrap_or(1.0)
-    };
     let rects: Vec<(f64, f64, f64, f64)> = p.rects.iter().map(|r| (r.x, r.y, r.w, r.h)).collect();
-    exec_win_ops(app, vec![WinOp::Region(p.label.clone(), dpr, rects)]);
+    let mut g = state.lock();
+    g.hit_rects.insert(p.label.clone(), rects);
 }
 
 pub fn handle_drag_start(app: &AppHandle, p: DragStartPayload) {

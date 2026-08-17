@@ -64,6 +64,7 @@ function quickbarHtml(): string {
       <button class="qb-btn" data-act="view-recent" title="最近">🕐</button>
       <button class="qb-btn" data-act="view-timeline" title="时间线">⏱</button>
       <button class="qb-btn" data-act="console" title="控制台">⚙</button>
+      <button class="qb-btn" data-act="dismiss" title="收起全部（保底）">🕳</button>
     </div>
   `;
 }
@@ -115,6 +116,7 @@ function panelHtml(): string {
         <button class="tb-btn" data-act="view-recent" title="最近（发牌）">🕐</button>
         <button class="tb-btn" data-act="view-timeline" title="时间线（崩塌）">⏱</button>
         <button class="tb-btn" data-act="console" title="控制台">⚙</button>
+        <button class="tb-btn" data-act="dismiss" title="收起全部（保底）">🕳</button>
       </div>
       <div class="sb-section today">
         <div class="sb-section-title">🔥 今日</div>
@@ -389,6 +391,10 @@ async function doAct(actName: string) {
       break;
     case "console":
       await actions.toggleConsole();
+      break;
+    case "dismiss":
+      // Q31 保底：收起全部窗口（action IPC 可靠；事件通道在 dev 下可能静默丢弃）
+      await actions.dismiss();
       break;
     case "undo": {
       const last = st?.journal[0];

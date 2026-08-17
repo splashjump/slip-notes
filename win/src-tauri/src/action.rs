@@ -387,6 +387,11 @@ pub fn dispatch(app: &AppHandle, req: ActionRequest) -> ActionResponse {
             s.sidebar_collapsed = true;
             Ok(Vec::new())
         }),
+        // Q31 保底：收起全部窗口（事件通道在 tauri dev 下被静默丢弃，改走 action IPC）
+        "dismiss" => {
+            canvas::handle_dismiss(app);
+            Ok(Vec::new())
+        },
         "view" => view_action(app, &state, args),
         "toggleConsole" => {
             // ⚠️ 锁内只翻转状态；show/hide（tauri API，可能阻塞等主线程）锁外执行
@@ -416,6 +421,30 @@ pub fn dispatch(app: &AppHandle, req: ActionRequest) -> ActionResponse {
             s.store.reset();
             Ok(Vec::new())
         }),
+        // Q31 验收：窗口壳 + 命中缓存 + 收起态写入日志（冒烟读日志/或 await 后查 state）
+        "debug.shellState" => {
+            let g = state.lock();
+            let hit0 = g.hit_rects.get("canvas-0").map(|v| v.len()).unwrap_or(0);
+            let sb = g.hit_rects.get("sidebar").map(|v| v.len()).unwrap_or(0);
+            log::info!(
+                "[shell] dismissed={} hit0={} sidebarHits={} monitors={}",
+                g.dismissed, hit0, sb, g.monitors.len()
+            );
+            drop(g);
+            Ok(Vec::new())
+        }
+        // Q31 验收：返回窗口句柄表（nchittest-check 用）
+        "debug.hwnds" => {
+            let g = state.lock();
+            let ids: Vec<String> = g
+                .hwnds
+                .iter()
+                .map(|(l, h)| format!("{l}={h}"))
+                .collect();
+            log::info!("[shell] hwnds: {}", ids.join(", "));
+            drop(g);
+            Ok(Vec::new())
+        }
 
         other => return err(format!("未知动作 {other}")),
     };

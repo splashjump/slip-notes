@@ -73,6 +73,7 @@ export const actions = {
   confirm: (id: string) => act({ name: "confirm", args: { id } }),
   expand: () => act({ name: "expand", args: {} }),
   collapse: () => act({ name: "collapse", args: {} }),
+  dismiss: () => act({ name: "dismiss", args: {} }),
   view: (name: string, open: boolean) => act({ name: "view", args: { name, open } }),
   toggleConsole: () => act({ name: "toggleConsole", args: {} }),
   fastForward: (days: number) => act({ name: "debug.fastForward", args: { days } }),
